@@ -143,6 +143,9 @@ namespace OpenRA.Server
 
 		OrderBuffer orderBuffer;
 
+		// Multiplayer games: the server decides which frame each client's orders are applied on (see FrameScheduler)
+		FrameScheduler frameScheduler;
+
 		volatile ServerState internalState = ServerState.WaitingPlayers;
 
 		readonly BlockingCollection<IServerEvent> events = new();
@@ -357,8 +360,13 @@ namespace OpenRA.Server
 				{
 					if (State != ServerState.ShuttingDown)
 					{
-						if (events.TryTake(out var e, 1000))
+						var timeout = frameScheduler != null && State == ServerState.GameStarted
+							? frameScheduler.MillisecondsUntilNextAction(Game.RunTime).Clamp(0, 1000) : 1000;
+
+						if (events.TryTake(out var e, timeout))
 							e.Invoke(this);
+
+						CloseDueFrames();
 
 						// PERF: Dedicated servers need to drain the action queue to remove references blocking the GC from cleaning up disposed objects.
 						if (Type == ServerType.Dedicated)
@@ -369,7 +377,8 @@ namespace OpenRA.Server
 
 						if (State == ServerState.GameStarted)
 						{
-							foreach (var (playerIndex, scale) in orderBuffer.GetTickScales())
+							var tickScales = frameScheduler != null ? frameScheduler.GetTickScales(Game.RunTime) : orderBuffer.GetTickScales();
+							foreach (var (playerIndex, scale) in tickScales)
 							{
 								var frame = CreateTickScaleFrame(scale);
 								var con = Conns.SingleOrDefault(c => c.PlayerIndex == playerIndex);
@@ -902,6 +911,13 @@ namespace OpenRA.Server
 				// sent it just to update the frame number would be wasteful. We instead send them
 				// a separate Ack packet that tells them to apply the order from a locally stored queue.
 				// TODO: Replace static latency with a dynamic order buffering system
+				if (frameScheduler != null && (data.Length == 0 || data[0] != (byte)OrderType.SyncHash))
+				{
+					// The orders are forwarded when the frame they are assigned to is closed
+					frameScheduler.ReceivePacket(conn.PlayerIndex, frame, data, Game.RunTime);
+					return;
+				}
+
 				if (data.Length == 0 || data[0] != (byte)OrderType.SyncHash)
 				{
 					frame += OrderLatency;
@@ -919,6 +935,31 @@ namespace OpenRA.Server
 			}
 
 			GameSave?.DispatchOrders(conn, frame, data);
+		}
+
+		void CloseDueFrames()
+		{
+			if (frameScheduler == null || State != ServerState.GameStarted)
+				return;
+
+			while (frameScheduler.TryCloseFrame(Game.RunTime, out var frame, out var contents))
+			{
+				foreach (var (client, data, packetCount) in contents)
+				{
+					// The client may have been dropped while this frame was being sent
+					var conn = Conns.FirstOrDefault(c => c.PlayerIndex == client);
+					if (conn == null || !conn.Validated)
+						continue;
+
+					// The disconnect marker for this client must follow its last frame. Update this first, in case
+					// the client gets dropped while the frame is being sent.
+					conn.LastOrdersFrame = frame;
+
+					// Forward to everyone else, and tell the sender which frame its packets were applied on
+					DispatchOrdersToClients(conn, frame, data);
+					DispatchFrameToClient(conn, client, CreateAckFrame(frame, (byte)packetCount));
+				}
+			}
 		}
 
 		void InterpretServerOrders(Connection conn, byte[] data)
@@ -1168,6 +1209,7 @@ namespace OpenRA.Server
 			lock (LobbyInfo)
 			{
 				orderBuffer?.RemovePlayer(toDrop.PlayerIndex);
+				frameScheduler?.RemoveClient(toDrop.PlayerIndex);
 				Conns.Remove(toDrop);
 
 				var dropClient = LobbyInfo.Clients.FirstOrDefault(c => c.Index == toDrop.PlayerIndex);
@@ -1409,6 +1451,12 @@ namespace OpenRA.Server
 						GameSave?.DispatchOrders(from, from.LastOrdersFrame, Array.Empty<byte>());
 					}
 				}
+
+				// In multiplayer games the server assigns orders to frames on its own clock from here on,
+				// so that one client's late orders don't hold up everyone else
+				if (IsMultiplayer && GameSave == null)
+					frameScheduler = new FrameScheduler(gameSpeed.Timestep, LobbyInfo.GlobalSettings.NetFrameInterval,
+						firstFrame + OrderLatency, Conns.Where(c => c.Validated).Select(c => c.PlayerIndex));
 			}
 		}
 
@@ -1525,6 +1573,7 @@ namespace OpenRA.Server
 			{
 				server.ReceivePing(connection, pingHistory);
 				server.orderBuffer?.ReceiveQueueLength(connection.PlayerIndex, queueLength);
+				server.frameScheduler?.ReceivePing(connection.PlayerIndex, pingHistory);
 			}
 		}
 

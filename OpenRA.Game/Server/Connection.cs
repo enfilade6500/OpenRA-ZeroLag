@@ -171,8 +171,10 @@ namespace OpenRA.Server
 						return;
 					}
 
-					// Regularly check player ping
-					if (lastPingSent.ElapsedMilliseconds > 1000 && TrySendData(CreatePingFrame()))
+					// Regularly check player ping. During games the round trip time is also used to pace
+					// the clients (see FrameScheduler), so it is measured more often.
+					var pingInterval = server.State == ServerState.GameStarted ? 250 : 1000;
+					if (lastPingSent.ElapsedMilliseconds > pingInterval && TrySendData(CreatePingFrame()))
 						lastPingSent.Restart();
 				}
 			}

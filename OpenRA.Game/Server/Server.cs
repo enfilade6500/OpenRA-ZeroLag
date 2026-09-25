@@ -907,7 +907,7 @@ namespace OpenRA.Server
 					frame += OrderLatency;
 					DispatchFrameToClient(conn, conn.PlayerIndex, CreateAckFrame(frame, 1));
 
-					orderBuffer.AddOrderTimestamp(conn.PlayerIndex);
+					orderBuffer?.AddOrderTimestamp(conn.PlayerIndex, frame);
 
 					// Track the last frame for each client so the disconnect handling can write
 					// an EndOfOrders marker with the correct frame number.
@@ -1512,11 +1512,7 @@ namespace OpenRA.Server
 		{
 			readonly Connection connection;
 			readonly int[] pingHistory;
-
-			// TODO: future net code changes
-#pragma warning disable IDE0052
 			readonly byte queueLength;
-#pragma warning restore IDE0052
 
 			public ConnectionPingEvent(Connection connection, int[] pingHistory, byte queueLength)
 			{
@@ -1528,6 +1524,7 @@ namespace OpenRA.Server
 			void IServerEvent.Invoke(Server server)
 			{
 				server.ReceivePing(connection, pingHistory);
+				server.orderBuffer?.ReceiveQueueLength(connection.PlayerIndex, queueLength);
 			}
 		}
 

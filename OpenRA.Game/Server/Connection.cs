@@ -42,6 +42,9 @@ namespace OpenRA.Server
 		long lastReceivedTime = 0;
 
 		readonly BlockingCollection<byte[]> sendQueue = new();
+		readonly ManualResetEventSlim sendLoopExited = new(false);
+		volatile bool receiveLoopExited;
+		volatile bool sendFailed;
 		readonly Queue<int> pingHistory = new();
 
 		public Connection(Server server, Socket socket, string authToken)
@@ -71,8 +74,19 @@ namespace OpenRA.Server
 		void SendReceiveLoop(object s)
 		{
 			var (server, socket) = ((Server, Socket))s;
-			socket.Blocking = false;
+
+			// Outgoing data is written by a dedicated thread (see SendLoop) as soon as it is queued.
+			// This thread previously only flushed the send queue after Poll returned, which meant that
+			// orders relayed to a client could sit in the queue for up to 100ms until that client sent
+			// something itself. That delay was added to every order relay, and to the recovery from every
+			// lockstep stall (when stalled clients stop sending and the Poll always runs to its timeout).
+			socket.Blocking = true;
 			socket.NoDelay = true;
+			new Thread(SendLoop)
+			{
+				Name = $"Client send ({EndPoint})",
+				IsBackground = true
+			}.Start(socket);
 
 			var receiveBuffer = new byte[1024];
 			var readBuffer = new List<byte>();
@@ -85,7 +99,7 @@ namespace OpenRA.Server
 			{
 				while (true)
 				{
-					// Wait up to 100ms for data to arrive before checking for data to send
+					// Wait up to 100ms for data to arrive before checking whether the connection has been closed
 					if (socket.Poll(100000, SelectMode.SelectRead))
 					{
 						var read = socket.Receive(receiveBuffer);
@@ -148,37 +162,18 @@ namespace OpenRA.Server
 						}
 					}
 
-					// Client has been dropped by the server
-					if (sendQueue.IsCompleted)
+					// Client has been dropped by the server (or sending failed) and all queued data has been sent
+					if (sendLoopExited.IsSet)
+					{
+						if (!sendFailed)
+							WaitForClientToClose(socket, receiveBuffer);
+
 						return;
+					}
 
 					// Regularly check player ping
 					if (lastPingSent.ElapsedMilliseconds > 1000 && TrySendData(CreatePingFrame()))
 						lastPingSent.Restart();
-
-					// Send all data immediately, we will block again on read
-					while (sendQueue.TryTake(out var data, 0))
-					{
-						var start = 0;
-						var length = data.Length;
-
-						// Non-blocking sends are free to send only part of the data
-						while (start < length)
-						{
-							var sent = socket.Send(data, start, length - start, SocketFlags.None, out var error);
-							if (error == SocketError.WouldBlock)
-							{
-								Log.Write("server", $"Non-blocking send of {length - start} bytes failed. Falling back to blocking send.");
-								socket.Blocking = true;
-								sent = socket.Send(data, start, length - start, SocketFlags.None);
-								socket.Blocking = false;
-							}
-							else if (error != SocketError.Success)
-								throw new SocketException((int)error);
-
-							start += sent;
-						}
-					}
 				}
 			}
 			catch (SocketException e)
@@ -187,8 +182,73 @@ namespace OpenRA.Server
 			}
 			finally
 			{
+				receiveLoopExited = true;
 				server.OnConnectionDisconnect(this);
 				socket.Dispose();
+			}
+		}
+
+		/// <summary>
+		/// The send loop has shut down our side of the connection after sending the final messages
+		/// (e.g. the reason the client was kicked). Give the client a moment to read them and close its
+		/// side: closing a socket that still has unread incoming data resets the connection, which can
+		/// make the client discard the final messages before it has read them.
+		/// </summary>
+		static void WaitForClientToClose(Socket socket, byte[] buffer)
+		{
+			var timer = Stopwatch.StartNew();
+			try
+			{
+				while (timer.ElapsedMilliseconds < 2000)
+					if (socket.Poll(100000, SelectMode.SelectRead) && socket.Receive(buffer) == 0)
+						return;
+			}
+			catch (SocketException) { }
+			catch (ObjectDisposedException) { }
+		}
+
+		void SendLoop(object s)
+		{
+			var socket = (Socket)s;
+			try
+			{
+				while (!sendQueue.IsCompleted)
+				{
+					if (!sendQueue.TryTake(out var data, 1000))
+					{
+						// The socket has been closed from the receive side; nothing more can be sent
+						if (receiveLoopExited)
+							return;
+
+						continue;
+					}
+
+					var start = 0;
+					while (start < data.Length)
+						start += socket.Send(data, start, data.Length - start, SocketFlags.None);
+				}
+
+				// All queued data has been sent: signal the end of the stream to the client
+				socket.Shutdown(SocketShutdown.Send);
+			}
+			catch (SocketException e)
+			{
+				sendFailed = true;
+				if (!receiveLoopExited)
+					Log.Write("server", $"Closing socket connection to {EndPoint} because of socket error: {e}");
+			}
+			catch (ObjectDisposedException)
+			{
+				// The receive loop closed the socket
+				sendFailed = true;
+			}
+			catch (InvalidOperationException)
+			{
+				// The send queue was completed while we were waiting on it
+			}
+			finally
+			{
+				sendLoopExited.Set();
 			}
 		}
 

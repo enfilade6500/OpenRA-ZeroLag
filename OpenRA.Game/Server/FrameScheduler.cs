@@ -33,6 +33,10 @@ namespace OpenRA.Server
 	/// strictly in order with no gaps, and the sender learns which frame its packets were applied on from
 	/// the existing Ack packet, whose count may be 0 (an empty frame) or more than 1 (merged packets).
 	///
+	/// Spectators, and players who have been defeated, are kept in lockstep and relayed like everyone else,
+	/// but the game never waits for them and is never slowed down for them: if they cannot keep up they
+	/// fall behind on their own.
+	///
 	/// Each client's playback is kept a small, steady distance behind the frames it receives by sending
 	/// it a TickScale, so it neither runs dry nor builds up delay. A client that falls behind (a hitch,
 	/// a burst of delayed packets) is told to run faster until it has caught up. If a client cannot keep
@@ -101,6 +105,10 @@ namespace OpenRA.Server
 			public int BehindIntervals;
 			public readonly Queue<(long Time, int Frame)> Progress = new();
 			public bool IsSpectator;
+			public bool IsDefeated;
+
+			// Nobody waits for, or is slowed down for, a client that is not (or no longer) playing
+			public bool ExemptFromPacing => IsSpectator || IsDefeated;
 
 			// Accumulated for the end-of-game summary
 			public long MaxBehind;
@@ -201,6 +209,16 @@ namespace OpenRA.Server
 			state.HasRtt = true;
 		}
 
+		/// <summary>A player has been defeated: keep relaying their orders, but stop waiting for them.</summary>
+		public void SetDefeated(int client)
+		{
+			if (!clients.TryGetValue(client, out var state) || state.IsDefeated || state.IsSpectator)
+				return;
+
+			state.IsDefeated = true;
+			log($"{describeClient(client)} has been defeated; the game will no longer wait for them.");
+		}
+
 		public void RemoveClient(int client)
 		{
 			if (clients.TryGetValue(client, out var state) && state.Seen && !state.IsSpectator)
@@ -263,7 +281,7 @@ namespace OpenRA.Server
 				return false;
 
 			// Last resort: don't run further ahead of a client than it can possibly be buffering
-			var waitingFor = clients.Where(c => !c.Value.IsSpectator && nextFrame - c.Value.LastReportedFrame > WindowFrames(c.Value)).Select(c => c.Key).ToList();
+			var waitingFor = clients.Where(c => !c.Value.ExemptFromPacing && nextFrame - c.Value.LastReportedFrame > WindowFrames(c.Value)).Select(c => c.Key).ToList();
 			var wasBlocked = blocked;
 			blocked = waitingFor.Count > 0;
 			if (blocked)
@@ -375,7 +393,7 @@ namespace OpenRA.Server
 			foreach (var (index, b) in behind)
 			{
 				var state = clients[index];
-				if (state.IsSpectator || b <= lagBudget)
+				if (state.ExemptFromPacing || b <= lagBudget)
 					continue;
 
 				if (state.FallingBehindIntervals < FallingBehindIntervalsBeforePaceChange && state.BehindIntervals < BehindIntervalsBeforePaceChange)
@@ -405,8 +423,8 @@ namespace OpenRA.Server
 
 			// Probe back towards full speed once every client is keeping up (a client that sent nothing
 			// this interval may be stuck, so wait until it reports again)
-			var playerBehind = behind.Where(b => !clients[b.Key].IsSpectator).Select(b => b.Value).ToList();
-			if (!cannotKeepUp && pace > 1f && playerBehind.Count == clients.Values.Count(c => !c.IsSpectator))
+			var playerBehind = behind.Where(b => !clients[b.Key].ExemptFromPacing).Select(b => b.Value).ToList();
+			if (!cannotKeepUp && pace > 1f && playerBehind.Count == clients.Values.Count(c => !c.ExemptFromPacing))
 			{
 				if (playerBehind.All(b => b <= nominalPeriod))
 					pace = Math.Max(1f, pace - PaceFastDownStep);
@@ -426,7 +444,7 @@ namespace OpenRA.Server
 					nextBehindReport = now + ReportInterval;
 					var speed = pace > 1f ? $" Game speed {100 / pace:F0}%." : "";
 					log("Players behind: " + string.Join(", ", lagging.Select(b =>
-						$"{describeClient(b.Key)}{(clients[b.Key].IsSpectator ? " (spectator)" : "")} {b.Value / 1000f:F1}s")) + "." + speed);
+						$"{describeClient(b.Key)}{(clients[b.Key].IsSpectator ? " (spectator)" : clients[b.Key].IsDefeated ? " (defeated)" : "")} {b.Value / 1000f:F1}s")) + "." + speed);
 				}
 			}
 
@@ -441,11 +459,11 @@ namespace OpenRA.Server
 
 					state.LastBehind = b;
 				}
-				else if (state.IsSpectator && nextFrame - state.LastReportedFrame > WindowFrames(state))
+				else if (state.ExemptFromPacing && nextFrame - state.LastReportedFrame > WindowFrames(state))
 				{
-					// A spectator so far behind that its frames are no longer tracked (or that sent nothing this
-					// interval) gets no lateness samples. Keep telling it to run flat out so that it can catch up
-					// if its computer recovers, instead of being stuck behind for the rest of the game.
+					// A spectator or defeated player so far behind that its frames are no longer tracked (or that
+					// sent nothing this interval) gets no lateness samples. Keep telling it to run flat out so that
+					// it can catch up if its computer recovers, instead of being stuck behind for the rest of the game.
 					tickMs = minTickMs;
 				}
 

@@ -104,6 +104,27 @@ namespace OpenRA.Test
 		}
 
 		[Test]
+		public void DefeatedPlayerNoLongerBlocksTheGame()
+		{
+			var s = new FrameScheduler(40, 3, 1, new[] { 0, 1 });
+			s.ReceivePacket(0, 1, Order, 0);
+			s.ReceivePacket(1, 1, Order, 0);
+			s.SetDefeated(1);
+
+			// Client 1 (defeated) goes silent; client 0 keeps up
+			var lastFrame = 0;
+			for (long t = 0; t <= 15000; t += 40)
+			{
+				foreach (var (frame, _) in Drain(s, t))
+					lastFrame = frame;
+
+				s.ReceivePacket(0, lastFrame + 5, Order, t);
+			}
+
+			Assert.That(lastFrame, Is.GreaterThan(100), "A silent defeated player must not block the game.");
+		}
+
+		[Test]
 		public void SilentSpectatorNeverBlocks()
 		{
 			var s = new FrameScheduler(40, 3, 1, new[] { 0, 1 }, spectatorIndices: new[] { 1 });

@@ -781,6 +781,9 @@ namespace OpenRA.Server
 			defeatedPlayer.Outcome = WinState.Lost;
 			defeatedPlayer.OutcomeTimestampUtc = DateTime.UtcNow;
 
+			// A defeated player is still in lockstep, but nobody should have to wait for them any more
+			frameScheduler?.SetDefeated(defeatedPlayer.ClientIndex);
+
 			// Set remaining players as winners if only one side remains
 			if (!AnyUndefinedWinStates())
 			{

@@ -1474,7 +1474,7 @@ namespace OpenRA.Server
 					frameScheduler = new FrameScheduler(gameSpeed.Timestep, LobbyInfo.GlobalSettings.NetFrameInterval,
 						firstFrame + OrderLatency, validConns.Select(c => c.PlayerIndex), Settings.MaxPlayerLag,
 						index => LobbyInfo.ClientWithIndex(index)?.Name ?? $"client {index}",
-						message => Log.Write("server", message), spectators);
+						message => Log.Write("server", message), spectators, Settings.MinGameSpeed);
 				}
 			}
 		}

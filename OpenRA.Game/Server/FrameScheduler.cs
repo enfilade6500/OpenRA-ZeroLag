@@ -41,8 +41,14 @@ namespace OpenRA.Server
 	/// it a TickScale, so it neither runs dry nor builds up delay. A client that falls behind (a hitch,
 	/// a burst of delayed packets) is told to run faster until it has caught up. If a client cannot keep
 	/// up even when running faster (its computer is too slow), the whole game is slowed down smoothly for
-	/// everyone instead. As a last resort, the server stops closing frames while any client is far behind,
-	/// which is the same "wait for everyone" behaviour as the original scheme.
+	/// everyone instead, but never below a configurable floor (Server.MinGameSpeed): a player whose computer
+	/// would need the game slower than that is left to fall behind on their own, like a spectator, rather than
+	/// dragging everyone down to a pace that would not have kept them in the game anyway.
+	///
+	/// As a last resort, the server stops closing frames while a player has stopped responding and is far
+	/// behind, which is the same "wait for everyone" behaviour as the original scheme and keeps the familiar
+	/// connection-problems / vote-kick flow. A player who is still sending frames, however slowly, never
+	/// holds the game.
 	/// </summary>
 	public sealed class FrameScheduler
 	{
@@ -63,8 +69,7 @@ namespace OpenRA.Server
 		const float MinTickScale = 0.7f;
 		const float MaxTickScale = 1.6f;
 
-		// Limits and steps for slowing down the whole game for a client that cannot keep up
-		const float MaxPace = 1.5f;
+		// Steps for slowing down the whole game for a client that cannot keep up (the limit is Server.MinGameSpeed)
 		const float PaceDownStep = 0.01f;
 		const float PaceFastDownStep = 0.03f;
 		const float PaceHeadroom = 0.97f;
@@ -76,10 +81,18 @@ namespace OpenRA.Server
 		// ...or after staying well behind for this many intervals, even if it is not falling further behind
 		const int BehindIntervalsBeforePaceChange = 6;
 
-		// Stop closing frames while a client is further behind than its normal position plus this (ms).
-		// Shorter outages (Wi-Fi dropouts, TCP retransmissions) only affect that client; the client catches
-		// up afterwards by running faster. Longer outages make everyone wait, like the original scheme.
+		// Stop closing frames while a client is further behind than its normal position plus this (ms),
+		// and has stopped sending. Shorter outages (Wi-Fi dropouts, TCP retransmissions) only affect that
+		// client; the client catches up afterwards by running faster. Longer outages make everyone wait,
+		// like the original scheme.
 		const int WindowSlack = 2000;
+
+		// A client that has not reported a new frame for this long has stopped (a dead connection or a
+		// frozen game) rather than merely being slow. Only stopped clients can make everyone wait.
+		const int StalledThreshold = 2000;
+
+		// Waits shorter than this are not logged individually; they are counted and reported in aggregate
+		const int LoggedWaitThreshold = 500;
 
 		// The client learns about merged packets through the Ack packet, whose count is a single byte
 		const int MaxPacketsPerFrame = byte.MaxValue;
@@ -97,6 +110,7 @@ namespace OpenRA.Server
 			public readonly List<(int ClientFrame, byte[] Data)> Pending = new();
 			public readonly List<long> SlackSamples = new();
 			public int LastReportedFrame;
+			public long LastProgressTime;
 			public int Rtt;
 			public bool HasRtt;
 			public long LastBehind;
@@ -106,9 +120,11 @@ namespace OpenRA.Server
 			public readonly Queue<(long Time, int Frame)> Progress = new();
 			public bool IsSpectator;
 			public bool IsDefeated;
+			public bool IsTooSlow;
 
-			// Nobody waits for, or is slowed down for, a client that is not (or no longer) playing
-			public bool ExemptFromPacing => IsSpectator || IsDefeated;
+			// Nobody waits for, or is slowed down for, a client that is not (or no longer) playing, or whose
+			// computer is too slow to be kept in the game by slowing everyone else down
+			public bool ExemptFromPacing => IsSpectator || IsDefeated || IsTooSlow;
 
 			// Accumulated for the end-of-game summary
 			public long MaxBehind;
@@ -128,6 +144,7 @@ namespace OpenRA.Server
 		readonly int firstFrame;
 		readonly int lagBudget;
 		readonly int windowSlack;
+		readonly float maxPace;
 		readonly Func<int, string> describeClient;
 		readonly Action<string> log;
 
@@ -138,7 +155,10 @@ namespace OpenRA.Server
 		float pace = 1f;
 		bool blocked;
 		long blockedSince;
+		long lastResumeTime = long.MinValue;
 		string blockedBy;
+		int shortWaits;
+		long shortWaitMs;
 		long nextBehindReport;
 
 		/// <param name="timestep">World tick length for the selected game speed (ms).</param>
@@ -152,10 +172,13 @@ namespace OpenRA.Server
 		/// <param name="spectatorIndices">Clients watching rather than playing. Their orders are still relayed and kept
 		/// in lockstep, but the game never waits for them and is never slowed down for them: a spectator who cannot keep
 		/// up simply falls behind on their own.</param>
+		/// <param name="minGameSpeed">The game is never slowed down below this percentage of normal speed for a slow
+		/// computer; a player who would need less is left to fall behind on their own.</param>
 		public FrameScheduler(int timestep, int netFrameInterval, int firstFrame, IEnumerable<int> clientIndices,
 			int maxPlayerLag = 0, Func<int, string> describeClient = null, Action<string> log = null,
-			IEnumerable<int> spectatorIndices = null)
+			IEnumerable<int> spectatorIndices = null, int minGameSpeed = 75)
 		{
+			maxPace = 100f / minGameSpeed.Clamp(25, 100);
 			this.timestep = timestep;
 			this.netFrameInterval = netFrameInterval;
 			this.firstFrame = firstFrame;
@@ -190,7 +213,11 @@ namespace OpenRA.Server
 				return;
 
 			state.Pending.Add((clientFrame, data));
-			state.LastReportedFrame = Math.Max(state.LastReportedFrame, clientFrame);
+			if (clientFrame > state.LastReportedFrame)
+			{
+				state.LastReportedFrame = clientFrame;
+				state.LastProgressTime = now;
+			}
 
 			// The client sends the packet for frame N just before it simulates frame N, so the time frame N
 			// spent in its buffer is the time since we closed it, minus the round trip
@@ -280,8 +307,11 @@ namespace OpenRA.Server
 			if (now < nextCloseTime)
 				return false;
 
-			// Last resort: don't run further ahead of a client than it can possibly be buffering
-			var waitingFor = clients.Where(c => !c.Value.ExemptFromPacing && nextFrame - c.Value.LastReportedFrame > WindowFrames(c.Value)).Select(c => c.Key).ToList();
+			// Last resort: don't run further ahead of a player who has stopped responding than they could
+			// possibly be buffering. A player who is still sending frames, however slowly, never holds the game.
+			var waitingFor = clients.Where(c => !c.Value.ExemptFromPacing
+				&& nextFrame - c.Value.LastReportedFrame > WindowFrames(c.Value)
+				&& now - c.Value.LastProgressTime > StalledThreshold).Select(c => c.Key).ToList();
 			var wasBlocked = blocked;
 			blocked = waitingFor.Count > 0;
 			if (blocked)
@@ -290,14 +320,27 @@ namespace OpenRA.Server
 				{
 					blockedSince = now;
 					blockedBy = string.Join(", ", waitingFor.Select(describeClient));
-					log($"Everyone is waiting for {blockedBy}, who has fallen too far behind or stopped responding.");
+
+					// Don't log the start of every wait in a rapid sequence; they are reported in aggregate
+					if (now - lastResumeTime > 1000)
+						log($"Everyone is waiting for {blockedBy}, who has stopped responding.");
 				}
 
 				return false;
 			}
 
 			if (wasBlocked)
-				log($"Game resumed after waiting {(now - blockedSince) / 1000f:F1}s for {blockedBy}.");
+			{
+				lastResumeTime = now;
+				var waited = now - blockedSince;
+				if (waited >= LoggedWaitThreshold)
+					log($"Game resumed after waiting {waited / 1000f:F1}s for {blockedBy}.");
+				else
+				{
+					shortWaits++;
+					shortWaitMs += waited;
+				}
+			}
 
 			frame = nextFrame++;
 			contents = new List<(int, byte[], int)>(clients.Count);
@@ -388,6 +431,19 @@ namespace OpenRA.Server
 					state.BehindIntervals = 0;
 			}
 
+			// A player whose computer was too slow has caught up again (it may have recovered): pace them normally
+			foreach (var (index, b) in behind)
+			{
+				var state = clients[index];
+				if (state.IsTooSlow && b <= lagBudget)
+				{
+					state.IsTooSlow = false;
+					state.FallingBehindIntervals = 0;
+					state.BehindIntervals = 0;
+					log($"{describeClient(index)} has caught up; the game will be slowed down for them again if needed.");
+				}
+			}
+
 			var cannotKeepUp = false;
 			var oldPace = pace;
 			foreach (var (index, b) in behind)
@@ -405,7 +461,19 @@ namespace OpenRA.Server
 				var framesPerMs = (double)(state.LastReportedFrame - startFrame) / Math.Max(1, now - startTime);
 				if (framesPerMs > 0)
 				{
-					var needed = (float)Math.Min(MaxPace, 1 / (nominalPeriod * PaceHeadroom * framesPerMs));
+					var needed = (float)(1 / (nominalPeriod * PaceHeadroom * framesPerMs));
+					if (needed > maxPace)
+					{
+						// Slowing everyone down to the floor would not keep this player in the game anyway,
+						// so don't make the others pay for it: this player falls behind on their own instead
+						state.IsTooSlow = true;
+						state.FallingBehindIntervals = 0;
+						state.BehindIntervals = 0;
+						log($"{describeClient(index)}'s computer is too slow to keep up (managing {framesPerMs * nominalPeriod * 100:F0}%, " +
+							$"{b / 1000f:F1}s behind); the game will not be slowed down below {100 / maxPace:F0}% for them, so they will fall behind on their own.");
+						continue;
+					}
+
 					if (needed > pace + 0.005f)
 					{
 						log($"Slowing the game to {100 / needed:F0}% of normal speed so that {describeClient(index)} can keep up " +
@@ -423,12 +491,15 @@ namespace OpenRA.Server
 
 			// Probe back towards full speed once every client is keeping up (a client that sent nothing
 			// this interval may be stuck, so wait until it reports again)
+			// Only start speeding back up once everyone is comfortably inside the lag budget, not right at its
+			// edge, so that the game does not alternate between slowing down and speeding up
 			var playerBehind = behind.Where(b => !clients[b.Key].ExemptFromPacing).Select(b => b.Value).ToList();
+			var recoveryThreshold = Math.Max(nominalPeriod, lagBudget / 2);
 			if (!cannotKeepUp && pace > 1f && playerBehind.Count == clients.Values.Count(c => !c.ExemptFromPacing))
 			{
 				if (playerBehind.All(b => b <= nominalPeriod))
 					pace = Math.Max(1f, pace - PaceFastDownStep);
-				else if (playerBehind.All(b => b <= lagBudget))
+				else if (playerBehind.All(b => b <= recoveryThreshold))
 					pace = Math.Max(1f, pace - PaceDownStep);
 
 				if (pace == 1f && oldPace > 1f)
@@ -438,13 +509,20 @@ namespace OpenRA.Server
 			// Periodically list players who are falling behind, so problems can be traced to a player
 			if (now >= nextBehindReport)
 			{
+				if (shortWaits > 0)
+				{
+					log($"The game paused {shortWaits} time(s) briefly ({shortWaitMs / 1000f:F1}s in total) waiting for {blockedBy}.");
+					shortWaits = 0;
+					shortWaitMs = 0;
+				}
+
 				var lagging = behind.Where(b => b.Value > ReportBehindThreshold).OrderByDescending(b => b.Value).ToList();
 				if (lagging.Count > 0)
 				{
 					nextBehindReport = now + ReportInterval;
 					var speed = pace > 1f ? $" Game speed {100 / pace:F0}%." : "";
 					log("Players behind: " + string.Join(", ", lagging.Select(b =>
-						$"{describeClient(b.Key)}{(clients[b.Key].IsSpectator ? " (spectator)" : clients[b.Key].IsDefeated ? " (defeated)" : "")} {b.Value / 1000f:F1}s")) + "." + speed);
+						$"{describeClient(b.Key)}{(clients[b.Key].IsSpectator ? " (spectator)" : clients[b.Key].IsDefeated ? " (defeated)" : clients[b.Key].IsTooSlow ? " (too slow)" : "")} {b.Value / 1000f:F1}s")) + "." + speed);
 				}
 			}
 

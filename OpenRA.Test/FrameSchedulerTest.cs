@@ -125,6 +125,70 @@ namespace OpenRA.Test
 		}
 
 		[Test]
+		public void TricklingPlayerNeverBlocksTheGame()
+		{
+			var s = new FrameScheduler(40, 3, 1, new[] { 0, 1 });
+			s.ReceivePacket(0, 1, Order, 0);
+			s.ReceivePacket(1, 1, Order, 0);
+
+			// Client 1 keeps sending, but only advances one frame per second (far slower than the game)
+			var lastFrame = 0;
+			var slowFrame = 1;
+			for (long t = 0; t <= 20000; t += 40)
+			{
+				foreach (var (frame, _) in Drain(s, t))
+					lastFrame = frame;
+
+				s.ReceivePacket(0, lastFrame, Order, t);
+				if (t % 1000 == 0 && slowFrame < lastFrame)
+					s.ReceivePacket(1, ++slowFrame, Order, t);
+			}
+
+			Assert.That(lastFrame, Is.GreaterThan(150), "A player who is still sending frames, however slowly, must not hold the game.");
+		}
+
+		[Test]
+		public void TooSlowComputerDoesNotSlowTheGameDown()
+		{
+			const int Timestep = 40;
+			var logs = new List<string>();
+			var s = new FrameScheduler(Timestep, 3, 1, new[] { 0, 1 }, 0, null, logs.Add, null, 75);
+			s.ReceivePing(0, new[] { 20 });
+			s.ReceivePing(1, new[] { 20 });
+			s.ReceivePacket(0, 1, Order, 0);
+			s.ReceivePacket(1, 1, Order, 0);
+
+			// Client 1 runs at half speed: it reports one frame every 240ms while frames close every 120ms
+			var lastFrame = 0;
+			var slowFrame = 1;
+			var scale0 = 1f;
+			var closed = new Queue<(int Frame, long At)>();
+			for (long t = 0; t <= 60000; t += 40)
+			{
+				foreach (var (frame, _) in Drain(s, t))
+				{
+					lastFrame = frame;
+					closed.Enqueue((frame, t));
+				}
+
+				// Client 0 behaves like a healthy real client: it uses each frame ~170ms after it closed
+				// (the 150ms target buffer plus its 20ms round trip), so it needs no per-client correction
+				while (closed.Count > 0 && t >= closed.Peek().At + 170)
+					s.ReceivePacket(0, closed.Dequeue().Frame, Order, t);
+
+				if (t % 240 == 0 && slowFrame < lastFrame)
+					s.ReceivePacket(1, ++slowFrame, Order, t);
+
+				foreach (var (client, scale) in s.GetTickScales(t))
+					if (client == 0)
+						scale0 = scale;
+			}
+
+			Assert.That(logs.Any(l => l.Contains("too slow")), Is.True, "The half-speed player should be marked too slow.");
+			Assert.That((int)(scale0 * Timestep), Is.EqualTo(Timestep), "The game must not stay slowed down for a player it cannot keep in anyway.");
+		}
+
+		[Test]
 		public void SilentSpectatorNeverBlocks()
 		{
 			var s = new FrameScheduler(40, 3, 1, new[] { 0, 1 }, spectatorIndices: new[] { 1 });

@@ -1454,7 +1454,16 @@ namespace OpenRA.Server
 
 				// In multiplayer games the server assigns orders to frames on its own clock from here on,
 				// so that one client's late orders don't hold up everyone else
-				if (IsMultiplayer && GameSave == null)
+				var useDynamicNetcode = string.Equals(Settings.Netcode, "dynamic", StringComparison.OrdinalIgnoreCase);
+				if (!useDynamicNetcode && !string.Equals(Settings.Netcode, "classic", StringComparison.OrdinalIgnoreCase))
+				{
+					Log.Write("server", $"Unknown Server.Netcode value '{Settings.Netcode}'; using 'dynamic'.");
+					useDynamicNetcode = true;
+				}
+
+				Log.Write("server", $"Netcode: {(useDynamicNetcode ? "dynamic" : "classic")}.");
+
+				if (IsMultiplayer && GameSave == null && useDynamicNetcode)
 				{
 					var validConns = Conns.Where(c => c.Validated).ToList();
 					var spectators = validConns.Select(c => c.PlayerIndex)

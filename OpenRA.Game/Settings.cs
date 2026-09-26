@@ -104,9 +104,11 @@ namespace OpenRA
 		public string Netcode = "dynamic";
 
 		[Desc("Multiplayer games: the game is never slowed down below this percentage of normal speed to accommodate a " +
-			"player whose computer can't keep up. A player who would need the game slower than this is left to fall behind " +
-			"on their own instead, so that one slow computer cannot drag everyone else down.")]
-		public int MinGameSpeed = 75;
+			"player whose computer can't keep up; a player who would need it slower is left to fall behind on their own " +
+			"instead (which, for that player, is much like being kicked). 0 (default) means no floor: as in the original " +
+			"game, the game follows the slowest player's computer however slow it is, smoothly rather than stuttering, " +
+			"and it is up to the players to vote-kick if they would rather not wait.")]
+		public int MinGameSpeed = 0;
 
 		[Desc("Multiplayer games: how far behind (in milliseconds) a player whose computer can't keep up may fall " +
 			"before the game is slowed down for everyone. While behind, only that player's orders take longer to take effect. " +

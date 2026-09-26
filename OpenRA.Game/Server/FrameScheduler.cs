@@ -69,8 +69,12 @@ namespace OpenRA.Server
 		const float MinTickScale = 0.7f;
 		const float MaxTickScale = 1.6f;
 
-		// Steps for slowing down the whole game for a client that cannot keep up (the limit is Server.MinGameSpeed)
+		// Steps for slowing down the whole game for a client that cannot keep up (the limit is Server.MinGameSpeed).
+		// With no configured floor the game can still not be slowed below this: a computer managing less than
+		// 10% of normal speed is not meaningfully in the game, and longer ticks would be indistinguishable
+		// from a frozen client to the players.
 		const float PaceDownStep = 0.01f;
+		const float PaceSanityLimit = 10f;
 		const float PaceFastDownStep = 0.03f;
 		const float PaceHeadroom = 0.97f;
 
@@ -173,12 +177,14 @@ namespace OpenRA.Server
 		/// in lockstep, but the game never waits for them and is never slowed down for them: a spectator who cannot keep
 		/// up simply falls behind on their own.</param>
 		/// <param name="minGameSpeed">The game is never slowed down below this percentage of normal speed for a slow
-		/// computer; a player who would need less is left to fall behind on their own.</param>
+		/// computer; a player who would need less is left to fall behind on their own. 0 (the default) means no
+		/// floor: like the original scheme, the game follows the slowest player's computer however slow it is,
+		/// and it is up to the players to vote-kick if they do not want to wait.</param>
 		public FrameScheduler(int timestep, int netFrameInterval, int firstFrame, IEnumerable<int> clientIndices,
 			int maxPlayerLag = 0, Func<int, string> describeClient = null, Action<string> log = null,
-			IEnumerable<int> spectatorIndices = null, int minGameSpeed = 75)
+			IEnumerable<int> spectatorIndices = null, int minGameSpeed = 0)
 		{
-			maxPace = 100f / minGameSpeed.Clamp(25, 100);
+			maxPace = minGameSpeed <= 0 ? PaceSanityLimit : Math.Min(PaceSanityLimit, 100f / minGameSpeed.Clamp(10, 100));
 			this.timestep = timestep;
 			this.netFrameInterval = netFrameInterval;
 			this.firstFrame = firstFrame;

@@ -1456,7 +1456,9 @@ namespace OpenRA.Server
 				// so that one client's late orders don't hold up everyone else
 				if (IsMultiplayer && GameSave == null)
 					frameScheduler = new FrameScheduler(gameSpeed.Timestep, LobbyInfo.GlobalSettings.NetFrameInterval,
-						firstFrame + OrderLatency, Conns.Where(c => c.Validated).Select(c => c.PlayerIndex));
+						firstFrame + OrderLatency, Conns.Where(c => c.Validated).Select(c => c.PlayerIndex), Settings.MaxPlayerLag,
+						index => LobbyInfo.ClientWithIndex(index)?.Name ?? $"client {index}",
+						message => Log.Write("server", message));
 			}
 		}
 

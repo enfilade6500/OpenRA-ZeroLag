@@ -83,6 +83,10 @@ namespace OpenRA.Server
 		// Close times are remembered for this many frames, to measure how long frames wait in client buffers
 		const int MaxTrackedFrames = 512;
 
+		// Players further behind than this are listed in the server log (ms), at most this often (ms)
+		const int ReportBehindThreshold = 500;
+		const int ReportInterval = 10000;
+
 		sealed class ClientState
 		{
 			public readonly List<(int ClientFrame, byte[] Data)> Pending = new();
@@ -105,6 +109,10 @@ namespace OpenRA.Server
 		readonly int minTickMs;
 		readonly int maxTickMs;
 		readonly int firstFrame;
+		readonly int lagBudget;
+		readonly int windowSlack;
+		readonly Func<int, string> describeClient;
+		readonly Action<string> log;
 
 		bool started;
 		int nextFrame;
@@ -112,16 +120,32 @@ namespace OpenRA.Server
 		long nextControlUpdate;
 		float pace = 1f;
 		bool blocked;
+		long blockedSince;
+		string blockedBy;
+		long nextBehindReport;
 
 		/// <param name="timestep">World tick length for the selected game speed (ms).</param>
 		/// <param name="netFrameInterval">World ticks per network frame.</param>
 		/// <param name="firstFrame">The first frame that this scheduler will close (the frames before it were sent at game start).</param>
 		/// <param name="clientIndices">The clients taking part in the game.</param>
-		public FrameScheduler(int timestep, int netFrameInterval, int firstFrame, IEnumerable<int> clientIndices)
+		/// <param name="maxPlayerLag">How far behind (ms) a player whose computer can't keep up may fall before the
+		/// game is slowed down for everyone. 0 slows the game down as soon as a player can't keep up.</param>
+		/// <param name="describeClient">Returns a player's name, for the log.</param>
+		/// <param name="log">Writes a line to the server log (not to the players).</param>
+		public FrameScheduler(int timestep, int netFrameInterval, int firstFrame, IEnumerable<int> clientIndices,
+			int maxPlayerLag = 0, Func<int, string> describeClient = null, Action<string> log = null)
 		{
 			this.timestep = timestep;
 			this.netFrameInterval = netFrameInterval;
 			this.firstFrame = firstFrame;
+			this.describeClient = describeClient ?? (c => $"client {c}");
+			this.log = log ?? (_ => { });
+
+			// A player may always fall two frames behind before the game is slowed down for them
+			lagBudget = Math.Max(2 * netFrameInterval * timestep, maxPlayerLag);
+
+			// Don't make everyone wait for a player who is still within the lag budget
+			windowSlack = Math.Max(WindowSlack, lagBudget + 1000);
 			nextFrame = firstFrame;
 			ticksPerInterval = Math.Max(1, Interval / timestep);
 			minTickMs = Math.Max(1, (int)Math.Ceiling(MinTickScale * timestep));
@@ -183,7 +207,7 @@ namespace OpenRA.Server
 		int WindowFrames(ClientState state)
 		{
 			var nominalPeriod = netFrameInterval * timestep;
-			return (int)Math.Ceiling((double)(state.Rtt + TargetSlack + WindowSlack) / nominalPeriod) + 1;
+			return (int)Math.Ceiling((double)(state.Rtt + TargetSlack + windowSlack) / nominalPeriod) + 1;
 		}
 
 		/// <summary>
@@ -214,9 +238,23 @@ namespace OpenRA.Server
 				return false;
 
 			// Last resort: don't run further ahead of a client than it can possibly be buffering
-			blocked = clients.Values.Any(c => nextFrame - c.LastReportedFrame > WindowFrames(c));
+			var waitingFor = clients.Where(c => nextFrame - c.Value.LastReportedFrame > WindowFrames(c.Value)).Select(c => c.Key).ToList();
+			var wasBlocked = blocked;
+			blocked = waitingFor.Count > 0;
 			if (blocked)
+			{
+				if (!wasBlocked)
+				{
+					blockedSince = now;
+					blockedBy = string.Join(", ", waitingFor.Select(describeClient));
+					log($"Everyone is waiting for {blockedBy}, who has fallen too far behind or stopped responding.");
+				}
+
 				return false;
+			}
+
+			if (wasBlocked)
+				log($"Game resumed after waiting {(now - blockedSince) / 1000f:F1}s for {blockedBy}.");
 
 			frame = nextFrame++;
 			contents = new List<(int, byte[], int)>(clients.Count);
@@ -297,10 +335,11 @@ namespace OpenRA.Server
 			}
 
 			var cannotKeepUp = false;
+			var oldPace = pace;
 			foreach (var (index, b) in behind)
 			{
 				var state = clients[index];
-				if (b <= 2 * nominalPeriod)
+				if (b <= lagBudget)
 					continue;
 
 				if (state.FallingBehindIntervals < FallingBehindIntervalsBeforePaceChange && state.BehindIntervals < BehindIntervalsBeforePaceChange)
@@ -311,7 +350,14 @@ namespace OpenRA.Server
 				var (startTime, startFrame) = state.Progress.Peek();
 				var framesPerMs = (double)(state.LastReportedFrame - startFrame) / Math.Max(1, now - startTime);
 				if (framesPerMs > 0)
-					pace = Math.Max(pace, (float)Math.Min(MaxPace, 1 / (nominalPeriod * PaceHeadroom * framesPerMs)));
+				{
+					var needed = (float)Math.Min(MaxPace, 1 / (nominalPeriod * PaceHeadroom * framesPerMs));
+					if (needed > pace + 0.005f)
+						log($"Slowing the game to {100 / needed:F0}% of normal speed so that {describeClient(index)} can keep up " +
+							$"(their computer is managing {framesPerMs * nominalPeriod * 100:F0}% and is {b / 1000f:F1}s behind).");
+
+					pace = Math.Max(pace, needed);
+				}
 
 				state.FallingBehindIntervals = 0;
 				state.BehindIntervals = 0;
@@ -324,8 +370,23 @@ namespace OpenRA.Server
 			{
 				if (behind.Values.All(b => b <= nominalPeriod))
 					pace = Math.Max(1f, pace - PaceFastDownStep);
-				else if (behind.Values.All(b => b <= 2 * nominalPeriod))
+				else if (behind.Values.All(b => b <= lagBudget))
 					pace = Math.Max(1f, pace - PaceDownStep);
+
+				if (pace == 1f && oldPace > 1f)
+					log("The game is back to full speed.");
+			}
+
+			// Periodically list players who are falling behind, so problems can be traced to a player
+			if (now >= nextBehindReport)
+			{
+				var lagging = behind.Where(b => b.Value > ReportBehindThreshold).OrderByDescending(b => b.Value).ToList();
+				if (lagging.Count > 0)
+				{
+					nextBehindReport = now + ReportInterval;
+					var speed = pace > 1f ? $" Game speed {100 / pace:F0}%." : "";
+					log("Players behind: " + string.Join(", ", lagging.Select(b => $"{describeClient(b.Key)} {b.Value / 1000f:F1}s")) + "." + speed);
+				}
 			}
 
 			foreach (var (index, state) in clients)

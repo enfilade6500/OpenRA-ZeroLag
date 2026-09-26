@@ -98,6 +98,11 @@ namespace OpenRA
 		[Desc("For dedicated servers only, save replays for all games played.")]
 		public bool RecordReplays = false;
 
+		[Desc("Multiplayer games: how far behind (in milliseconds) a player whose computer can't keep up may fall " +
+			"before the game is slowed down for everyone. While behind, only that player's orders take longer to take effect. " +
+			"0 slows the game down for everyone as soon as a player can't keep up.")]
+		public int MaxPlayerLag = 0;
+
 		[Desc("For dedicated servers only, treat maps that fail the lint checks as invalid.")]
 		public bool EnableLintChecks = true;
 

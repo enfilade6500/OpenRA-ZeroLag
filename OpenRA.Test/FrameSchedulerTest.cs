@@ -123,6 +123,32 @@ namespace OpenRA.Test
 		}
 
 		[Test]
+		public void FarBehindSpectatorIsStillToldToCatchUp()
+		{
+			const int Timestep = 40;
+			var s = new FrameScheduler(Timestep, 3, 1, new[] { 0, 1 }, spectatorIndices: new[] { 1 });
+			s.ReceivePacket(0, 1, Order, 0);
+			s.ReceivePacket(1, 1, Order, 0);
+
+			// Spectator goes silent for a long time (well past the tracked-frame history); the player keeps up
+			var lastFrame = 0;
+			float lastSpectatorScale = 1f;
+			for (long t = 0; t <= 400000; t += 40)
+			{
+				foreach (var (frame, _) in Drain(s, t))
+					lastFrame = frame;
+
+				s.ReceivePacket(0, lastFrame, Order, t);
+				foreach (var (client, scale) in s.GetTickScales(t))
+					if (client == 1)
+						lastSpectatorScale = scale;
+			}
+
+			Assert.That(lastFrame, Is.GreaterThan(2048), "Precondition: spectator should be behind by more than the tracked history.");
+			Assert.That((int)(lastSpectatorScale * Timestep), Is.LessThan(Timestep), "A far-behind spectator must still be told to run faster than normal.");
+		}
+
+		[Test]
 		public void TickScalesApplyToValidTickLengths()
 		{
 			const int Timestep = 40;

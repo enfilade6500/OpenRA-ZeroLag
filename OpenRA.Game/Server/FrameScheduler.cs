@@ -80,8 +80,9 @@ namespace OpenRA.Server
 		// The client learns about merged packets through the Ack packet, whose count is a single byte
 		const int MaxPacketsPerFrame = byte.MaxValue;
 
-		// Close times are remembered for this many frames, to measure how long frames wait in client buffers
-		const int MaxTrackedFrames = 512;
+		// Close times are remembered for this many frames, to measure how long frames wait in client buffers.
+		// Players cannot fall this far behind (the window above stops the game first), but spectators can.
+		const int MaxTrackedFrames = 2048;
 
 		// Players further behind than this are listed in the server log (ms), at most this often (ms)
 		const int ReportBehindThreshold = 500;
@@ -439,6 +440,13 @@ namespace OpenRA.Server
 						tickMs = (int)Math.Round(baseTickMs - Gain * b / ticksPerInterval);
 
 					state.LastBehind = b;
+				}
+				else if (state.IsSpectator && nextFrame - state.LastReportedFrame > WindowFrames(state))
+				{
+					// A spectator so far behind that its frames are no longer tracked (or that sent nothing this
+					// interval) gets no lateness samples. Keep telling it to run flat out so that it can catch up
+					// if its computer recovers, instead of being stuck behind for the rest of the game.
+					tickMs = minTickMs;
 				}
 
 				var roundedBaseTickMs = (int)Math.Round(baseTickMs);

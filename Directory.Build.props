@@ -15,6 +15,12 @@
     <Nullable>disable</Nullable>
     <Product>OpenRA</Product>
     <Copyright>Copyright (c) The OpenRA Developers and Contributors</Copyright>
+    <!-- This branch tracks release-20250330 and deliberately keeps its dependencies. "make check" builds with
+      warnings as errors, and newer SDKs add two warnings that would fail it before a line is compiled: that
+      net6.0 is out of support (NETSDK1138), and the NuGet audit of the release's pinned packages (NU19xx).
+      Silence those two; the code analyzers still run. -->
+    <CheckEolTargetFramework>false</CheckEolTargetFramework>
+    <NuGetAudit>false</NuGetAudit>
   </PropertyGroup>
 
   <PropertyGroup>

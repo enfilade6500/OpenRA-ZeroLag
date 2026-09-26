@@ -130,6 +130,16 @@ namespace OpenRA.Server
 			// computer is too slow to be kept in the game by slowing everyone else down
 			public bool ExemptFromPacing => IsSpectator || IsDefeated || IsTooSlow;
 
+			// The speed (as a fraction of normal) the client was last told to run at
+			public float RequestedSpeed = 1f;
+
+			// What the client's computer has been observed to manage (as a fraction of normal speed). A client
+			// in lockstep can never run ahead of the frames it has been sent, so its true capacity only shows
+			// while it is working through a backlog: the fastest rate seen then is a lower bound (PeakSpeed),
+			// and the rate it managed while it was the one slowing the game down is a measurement (SlowestSpeed).
+			public double PeakSpeed;
+			public double SlowestSpeed;
+
 			// Accumulated for the end-of-game summary
 			public long MaxBehind;
 			public double SumBehind;
@@ -164,6 +174,28 @@ namespace OpenRA.Server
 		int shortWaits;
 		long shortWaitMs;
 		long nextBehindReport;
+		int slowestClient = -1;
+		double slowestClientSpeed;
+
+		/// <summary>The current game speed as a percentage of normal (100 when the game is not slowed down).</summary>
+		public int SpeedPercent => (int)Math.Round(100 / pace);
+
+		/// <summary>
+		/// The player whose computer the game is currently slowed down for, or null when the game runs at full
+		/// speed or that player has left. The speed is the fraction of normal speed their computer managed.
+		/// </summary>
+		public (int Client, double Speed)? SlowestPlayer =>
+			pace > 1f && slowestClient >= 0 && clients.TryGetValue(slowestClient, out var state) && !state.ExemptFromPacing
+				? (slowestClient, slowestClientSpeed) : null;
+
+		/// <summary>Players whose computers would need the game slower than the floor, and are falling behind on their own.</summary>
+		public IEnumerable<int> TooSlowPlayers => clients.Where(c => c.Value.IsTooSlow).Select(c => c.Key);
+
+		/// <summary>The player most recently found to need the game slower than the floor (-1 if none).</summary>
+		public int LastTooSlowPlayer { get; private set; } = -1;
+
+		/// <summary>The lowest game speed (percent) the scheduler will slow the game to; 100 / maxPace.</summary>
+		public int MinSpeedPercent => (int)Math.Round(100 / maxPace);
 
 		/// <param name="timestep">World tick length for the selected game speed (ms).</param>
 		/// <param name="netFrameInterval">World ticks per network frame.</param>
@@ -257,9 +289,16 @@ namespace OpenRA.Server
 			if (clients.TryGetValue(client, out var state) && state.Seen && !state.IsSpectator)
 			{
 				var avg = state.BehindSamples > 0 ? state.SumBehind / state.BehindSamples : 0;
+				var computer = state.SlowestSpeed > 0 ? $" Their computer managed {state.SlowestSpeed * 100:F0}% while it was slowing the game" : "";
+				if (state.PeakSpeed > 0)
+					computer += (computer.Length > 0 ? ", and" : " Their computer managed") + $" at least {state.PeakSpeed * 100:F0}% at best";
+
 				log($"Summary for {describeClient(client)}: worst {state.MaxBehind / 1000f:F1}s behind, " +
-					$"average {avg / 1000f:F2}s; caused {state.SlowdownsCaused} slowdown(s).");
+					$"average {avg / 1000f:F2}s; caused {state.SlowdownsCaused} slowdown(s)." + (computer.Length > 0 ? computer + "." : ""));
 			}
+
+			if (client == slowestClient)
+				slowestClient = -1;
 
 			clients.Remove(client);
 		}
@@ -435,6 +474,18 @@ namespace OpenRA.Server
 					state.BehindIntervals++;
 				else
 					state.BehindIntervals = 0;
+
+				// A client that was told to run faster and spent the whole interval with a backlog (behind at the start
+				// and still behind at the end, so it never ran out of frames) was limited only by its computer, or by the
+				// speed it was asked for. Either way the rate it managed is a lower bound on what its computer can do.
+				if (state.WasToldToSpeedUp && state.LastBehind > nominalPeriod && b > SlackDeadband && state.Progress.Count >= 2)
+				{
+					var snapshots = state.Progress.ToArray();
+					var (startTime, startFrame) = snapshots[^2];
+					var (endTime, endFrame) = snapshots[^1];
+					var achieved = (endFrame - startFrame) * (double)nominalPeriod / Math.Max(1, endTime - startTime);
+					state.PeakSpeed = Math.Max(state.PeakSpeed, Math.Min(achieved, state.RequestedSpeed));
+				}
 			}
 
 			// A player whose computer was too slow has caught up again (it may have recovered): pace them normally
@@ -475,16 +526,26 @@ namespace OpenRA.Server
 						state.IsTooSlow = true;
 						state.FallingBehindIntervals = 0;
 						state.BehindIntervals = 0;
+						LastTooSlowPlayer = index;
 						log($"{describeClient(index)}'s computer is too slow to keep up (managing {framesPerMs * nominalPeriod * 100:F0}%, " +
 							$"{b / 1000f:F1}s behind); the game will not be slowed down below {100 / maxPace:F0}% for them, so they will fall behind on their own.");
 						continue;
 					}
 
+					var managed = framesPerMs * nominalPeriod;
 					if (needed > pace + 0.005f)
 					{
 						log($"Slowing the game to {100 / needed:F0}% of normal speed so that {describeClient(index)} can keep up " +
-							$"(their computer is managing {framesPerMs * nominalPeriod * 100:F0}% and is {b / 1000f:F1}s behind).");
+							$"(their computer is managing {managed * 100:F0}% and is {b / 1000f:F1}s behind).");
 						state.SlowdownsCaused++;
+					}
+
+					// This player needs the game at least as slow as it is, so they are the one it is slowed down for
+					if (needed > 1.005f && needed >= pace - 0.005f)
+					{
+						slowestClient = index;
+						slowestClientSpeed = managed;
+						state.SlowestSpeed = state.SlowestSpeed > 0 ? Math.Min(state.SlowestSpeed, managed) : managed;
 					}
 
 					pace = Math.Max(pace, needed);
@@ -509,7 +570,10 @@ namespace OpenRA.Server
 					pace = Math.Max(1f, pace - PaceDownStep);
 
 				if (pace == 1f && oldPace > 1f)
+				{
+					slowestClient = -1;
 					log("The game is back to full speed.");
+				}
 			}
 
 			// Periodically list players who are falling behind, so problems can be traced to a player
@@ -554,6 +618,7 @@ namespace OpenRA.Server
 				var roundedBaseTickMs = (int)Math.Round(baseTickMs);
 				tickMs = tickMs.Clamp(minTickMs, Math.Max(maxTickMs, (int)Math.Round(baseTickMs * 1.25f)));
 				state.WasToldToSpeedUp = tickMs < roundedBaseTickMs;
+				state.RequestedSpeed = (float)timestep / tickMs;
 
 				// Clients compute (int)(scale * timestep); the half millisecond keeps float rounding
 				// from landing just below the intended value

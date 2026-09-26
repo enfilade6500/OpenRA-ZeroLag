@@ -282,6 +282,29 @@ namespace OpenRA.Server
 
 			state.IsDefeated = true;
 			log($"{describeClient(client)} has been defeated; the game will no longer wait for them.");
+			if (client == slowestClient)
+				RestoreFullSpeed($"{describeClient(client)} has been defeated");
+		}
+
+		// The player the game was slowed down for is no longer playing: there is nothing left to ramp back up
+		// for, so return to full speed at once (players expect to see the effect immediately after a kick).
+		// If someone else cannot keep up either, the game is slowed down for them again within a few seconds.
+		void RestoreFullSpeed(string reason)
+		{
+			slowestClient = -1;
+			if (pace <= 1f)
+				return;
+
+			pace = 1f;
+			foreach (var state in clients.Values)
+			{
+				state.FallingBehindIntervals = 0;
+				state.BehindIntervals = 0;
+			}
+
+			// Tell every client its new tick length straight away rather than at the next interval
+			nextControlUpdate = 0;
+			log($"{reason}; the game is back to full speed.");
 		}
 
 		public void RemoveClient(int client)
@@ -298,7 +321,7 @@ namespace OpenRA.Server
 			}
 
 			if (client == slowestClient)
-				slowestClient = -1;
+				RestoreFullSpeed($"{describeClient(client)} has left");
 
 			clients.Remove(client);
 		}

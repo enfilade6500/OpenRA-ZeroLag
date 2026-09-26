@@ -792,6 +792,9 @@ namespace OpenRA.Server
 			defeatedPlayer.OutcomeTimestampUtc = DateTime.UtcNow;
 
 			// A defeated player is still in lockstep, but nobody should have to wait for them any more
+			if (frameScheduler?.SlowestPlayer?.Client == defeatedPlayer.ClientIndex)
+				speedAnnouncer?.SlowestPlayerGone();
+
 			frameScheduler?.SetDefeated(defeatedPlayer.ClientIndex);
 
 			// Set remaining players as winners if only one side remains
@@ -1290,6 +1293,9 @@ namespace OpenRA.Server
 			lock (LobbyInfo)
 			{
 				orderBuffer?.RemovePlayer(toDrop.PlayerIndex);
+				if (frameScheduler?.SlowestPlayer?.Client == toDrop.PlayerIndex)
+					speedAnnouncer?.SlowestPlayerGone();
+
 				frameScheduler?.RemoveClient(toDrop.PlayerIndex);
 				Conns.Remove(toDrop);
 

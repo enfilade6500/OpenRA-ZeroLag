@@ -340,6 +340,25 @@ namespace OpenRA.Test
 		}
 
 		[Test]
+		public void KickedSlowestPlayerRestoresFullSpeedAtOnce()
+		{
+			// P1 (80%) slows the game; at 30s P1 is kicked. The game must be back at 100% within a second,
+			// not ramp up over half a minute, and P0 must be told its normal tick length straight away.
+			var speedAfterKick = new List<(long T, int Speed, int Tick0)>();
+			var (logs, _, _) = RunWithCapacities(new[] { 2.0, 0.8, 2.0 }, 45000, 0, (t, cs, sched) =>
+			{
+				if (t == 30000)
+					sched.RemoveClient(1);
+				if (t > 30000)
+					speedAfterKick.Add((t, sched.SpeedPercent, cs[0].TickMs));
+			});
+
+			Assert.That(speedAfterKick.Select(x => x.Speed), Is.All.EqualTo(100), "Speed should be 100% from the first second after the kick.");
+			Assert.That(speedAfterKick.Skip(1).Select(x => x.Tick0), Is.All.LessThanOrEqualTo(40), "The remaining players should run at normal tick length right after the kick.");
+			Assert.That(logs.Any(l => l.Contains("P1 has left; the game is back to full speed")), Is.True);
+		}
+
+		[Test]
 		public void CapacityIsMeasuredWhileCatchingUp()
 		{
 			// P1 freezes for 3s and then catches up: while it works through the backlog the scheduler learns a
@@ -396,6 +415,15 @@ namespace OpenRA.Test
 				Step(t, 100);
 			Assert.That(messages.Count - lastBefore, Is.EqualTo(1), "Sustained full speed should be announced exactly once.");
 			Assert.That(messages.Last().M, Is.EqualTo("The game is back to full speed."));
+
+			var kick = new GameSpeedAnnouncer(false, null, i => $"P{i}");
+			kick.Tick(0, 80, 1, 0, -1, 10);
+			Assert.That(kick.Tick(5000, 80, 1, 0, -1, 10), Is.Null, "Precondition: within the rate limit nothing is said.");
+			kick.SlowestPlayerGone();
+			var afterKick = kick.Tick(6000, 100, null, 0, -1, 10);
+			Assert.That(afterKick, Is.Not.Null, "Full speed should be announced immediately after the slowest player is kicked.");
+			Assert.That(afterKick.Value.Message, Is.EqualTo("The game is back to full speed."));
+			Assert.That(kick.Tick(7000, 100, null, 0, -1, 10), Is.Null, "...and only once.");
 
 			var named = new GameSpeedAnnouncer(true, null, i => $"P{i}");
 			var m1 = named.Tick(0, 80, 1, 0, -1, 10);

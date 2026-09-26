@@ -56,6 +56,16 @@ namespace OpenRA.Server
 		bool announced;
 		long fullSpeedSince = -1;
 		int announcedTooSlow;
+		bool slowestPlayerGone;
+
+		/// <summary>
+		/// The player the game was slowed down for has been kicked, has left or has been defeated. The return
+		/// to full speed that follows is announced at once, so players see the effect.
+		/// </summary>
+		public void SlowestPlayerGone()
+		{
+			slowestPlayerGone = true;
+		}
 
 		/// <param name="namePlayer">Name the player the game is slowed down for. Otherwise they are only told privately.</param>
 		/// <param name="voteHint">Appended to slowdown messages (e.g. how to vote to kick the slowest player), or null.</param>
@@ -89,6 +99,16 @@ namespace OpenRA.Server
 			// Players who caught up again need no message; only note it so a later one is announced again
 			if (tooSlowCount < announcedTooSlow)
 				announcedTooSlow = tooSlowCount;
+
+			if (slowestPlayerGone)
+			{
+				slowestPlayerGone = false;
+				if (speedPercent >= 100 && lastAnnouncedSpeed < 100)
+				{
+					lastAnnouncedSpeed = 100;
+					return Announce(now, "The game is back to full speed.");
+				}
+			}
 
 			if (announced && now - lastAnnounceTime < MinInterval)
 				return null;

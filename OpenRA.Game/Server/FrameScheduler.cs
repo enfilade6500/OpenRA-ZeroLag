@@ -100,6 +100,13 @@ namespace OpenRA.Server
 			public int BehindIntervals;
 			public readonly Queue<(long Time, int Frame)> Progress = new();
 			public bool IsSpectator;
+
+			// Accumulated for the end-of-game summary
+			public long MaxBehind;
+			public double SumBehind;
+			public int BehindSamples;
+			public int SlowdownsCaused;
+			public bool Seen;
 		}
 
 		readonly Dictionary<int, ClientState> clients = new();
@@ -195,6 +202,13 @@ namespace OpenRA.Server
 
 		public void RemoveClient(int client)
 		{
+			if (clients.TryGetValue(client, out var state) && state.Seen && !state.IsSpectator)
+			{
+				var avg = state.BehindSamples > 0 ? state.SumBehind / state.BehindSamples : 0;
+				log($"Summary for {describeClient(client)}: worst {state.MaxBehind / 1000f:F1}s behind, " +
+					$"average {avg / 1000f:F2}s; caused {state.SlowdownsCaused} slowdown(s).");
+			}
+
 			clients.Remove(client);
 		}
 
@@ -316,8 +330,19 @@ namespace OpenRA.Server
 				if (state.SlackSamples.Count == 0)
 					continue;
 
-				behind[index] = Median(state.SlackSamples) - TargetSlack;
+				var b = Median(state.SlackSamples) - TargetSlack;
+				behind[index] = b;
 				state.SlackSamples.Clear();
+
+				// Summary stats (only count real lateness, not being ahead of schedule)
+				state.Seen = true;
+				if (b > 0)
+				{
+					state.MaxBehind = Math.Max(state.MaxBehind, b);
+					state.SumBehind += b;
+				}
+
+				state.BehindSamples++;
 			}
 
 			// A client that is well behind and keeps falling further behind even though it was told to run
@@ -363,8 +388,11 @@ namespace OpenRA.Server
 				{
 					var needed = (float)Math.Min(MaxPace, 1 / (nominalPeriod * PaceHeadroom * framesPerMs));
 					if (needed > pace + 0.005f)
+					{
 						log($"Slowing the game to {100 / needed:F0}% of normal speed so that {describeClient(index)} can keep up " +
 							$"(their computer is managing {framesPerMs * nominalPeriod * 100:F0}% and is {b / 1000f:F1}s behind).");
+						state.SlowdownsCaused++;
+					}
 
 					pace = Math.Max(pace, needed);
 				}

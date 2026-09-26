@@ -115,6 +115,19 @@ namespace OpenRA
 			"0 slows the game down for everyone as soon as a player can't keep up.")]
 		public int MaxPlayerLag = 0;
 
+		[Desc("Multiplayer games: tell the players in the game chat when the game is slowed down for a slow computer " +
+			"and when it is back to full speed (at most one message every 30 seconds). The player concerned is told " +
+			"privately; the others are not told who it is unless NameSlowestPlayer is set. Players can ask with !speed.")]
+		public bool AnnounceGameSpeed = true;
+
+		[Desc("Multiplayer games: name the player whose computer the game is being slowed down for in the game chat.")]
+		public bool NameSlowestPlayer = false;
+
+		[Desc("Multiplayer games: let players vote, by typing !kickslow in the chat, to kick whichever player the game is " +
+			"currently being slowed down for, without needing to know who it is. Uses the same majority, timeout and " +
+			"cooldown rules as the normal vote kick, and requires EnableVoteKick.")]
+		public bool VoteKickSlowest = false;
+
 		[Desc("For dedicated servers only, treat maps that fail the lint checks as invalid.")]
 		public bool EnableLintChecks = true;
 

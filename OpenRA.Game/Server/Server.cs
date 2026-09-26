@@ -145,6 +145,8 @@ namespace OpenRA.Server
 
 		// Multiplayer games: the server decides which frame each client's orders are applied on (see FrameScheduler)
 		FrameScheduler frameScheduler;
+		GameSpeedAnnouncer speedAnnouncer;
+		SlowestPlayerVote slowestPlayerVote;
 
 		volatile ServerState internalState = ServerState.WaitingPlayers;
 
@@ -378,14 +380,22 @@ namespace OpenRA.Server
 						if (State == ServerState.GameStarted)
 						{
 							var tickScales = frameScheduler != null ? frameScheduler.GetTickScales(Game.RunTime) : orderBuffer.GetTickScales();
+							var updated = false;
 							foreach (var (playerIndex, scale) in tickScales)
 							{
+								updated = true;
 								var frame = CreateTickScaleFrame(scale);
 								var con = Conns.SingleOrDefault(c => c.PlayerIndex == playerIndex);
 
 								if (con != null && con.Validated)
 									DispatchFrameToClient(con, playerIndex, frame);
 							}
+
+							// The scheduler only recalculates once per interval; announcements follow the same rhythm
+							if (updated)
+								AnnounceGameSpeed();
+
+							slowestPlayerVote?.Tick(Game.RunTime, frameScheduler?.SlowestPlayer?.Client);
 						}
 					}
 
@@ -1016,6 +1026,68 @@ namespace OpenRA.Server
 			Console.WriteLine($"[{DateTime.Now.ToString(Settings.TimestampFormat, CultureInfo.CurrentCulture)}] {line}");
 		}
 
+		/// <summary>Tells the players about game speed changes, when there is something worth saying.</summary>
+		void AnnounceGameSpeed()
+		{
+			if (speedAnnouncer == null || frameScheduler == null)
+				return;
+
+			var slowest = frameScheduler.SlowestPlayer;
+			var announcement = speedAnnouncer.Tick(Game.RunTime, frameScheduler.SpeedPercent, slowest?.Client,
+				frameScheduler.TooSlowPlayers.Count(), frameScheduler.LastTooSlowPlayer, frameScheduler.MinSpeedPercent);
+			if (announcement == null)
+				return;
+
+			SendMessage(announcement.Value.Message);
+			if (announcement.Value.PrivateMessage != null)
+			{
+				var conn = Conns.FirstOrDefault(c => c.Validated && c.PlayerIndex == announcement.Value.PrivateClient);
+				if (conn != null)
+					SendOrderTo(conn, "Message", announcement.Value.PrivateMessage);
+			}
+		}
+
+		/// <summary>Chat lines starting with '!' are requests to this server. Returns false for ordinary chat.</summary>
+		bool InterpretChatCommand(Connection conn, string text)
+		{
+			if (string.IsNullOrEmpty(text) || text[0] != '!')
+				return false;
+
+			var command = text.Trim().ToLowerInvariant();
+			if (command == "!speed")
+			{
+				var slowest = frameScheduler.SlowestPlayer;
+				string reply;
+				if (slowest == null)
+					reply = frameScheduler.SpeedPercent >= 100 ? "The game is running at full speed." : $"The game is running at {frameScheduler.SpeedPercent}% speed.";
+				else
+				{
+					var who = slowest.Value.Client == conn.PlayerIndex ? "your computer"
+						: Settings.NameSlowestPlayer ? $"{LobbyInfo.ClientWithIndex(slowest.Value.Client)?.Name}'s computer"
+						: "the slowest computer";
+					reply = $"The game is running at {frameScheduler.SpeedPercent}% speed so that {who} (managing about {slowest.Value.Speed * 100:F0}%) can keep up.";
+					if (slowestPlayerVote != null && slowest.Value.Client != conn.PlayerIndex)
+						reply += $" Type {SlowestPlayerVote.Command} to vote to kick the slowest player.";
+				}
+
+				SendOrderTo(conn, "Message", reply);
+				return true;
+			}
+
+			if (command == SlowestPlayerVote.Command)
+			{
+				if (slowestPlayerVote == null)
+					SendOrderTo(conn, "Message", "Voting to kick the slowest player is not enabled on this server.");
+				else
+					slowestPlayerVote.Vote(conn, Game.RunTime, frameScheduler.SlowestPlayer?.Client);
+
+				return true;
+			}
+
+			// Not a command of ours: let it through as chat (players do write "!!!")
+			return false;
+		}
+
 		void InterpretServerOrder(Connection conn, Order o)
 		{
 			lock (LobbyInfo)
@@ -1050,9 +1122,15 @@ namespace OpenRA.Server
 
 					case "Chat":
 					{
-						if (!IsMultiplayer || !playerMessageTracker.IsPlayerAtFloodLimit(conn))
-							DispatchOrdersToClients(conn, 0, o.Serialize());
+						if (IsMultiplayer && playerMessageTracker.IsPlayerAtFloodLimit(conn))
+							break;
 
+						// Commands for this server start with '!' ('/' commands never leave the client). They are
+						// answered rather than relayed; the sender's own client has already shown them the line.
+						if (frameScheduler != null && State == ServerState.GameStarted && InterpretChatCommand(conn, o.TargetString))
+							break;
+
+						DispatchOrdersToClients(conn, 0, o.Serialize());
 						break;
 					}
 
@@ -1471,10 +1549,18 @@ namespace OpenRA.Server
 					var validConns = Conns.Where(c => c.Validated).ToList();
 					var spectators = validConns.Select(c => c.PlayerIndex)
 						.Where(i => LobbyInfo.ClientWithIndex(i)?.IsObserver ?? false);
+					string DescribeClient(int index) => LobbyInfo.ClientWithIndex(index)?.Name ?? $"client {index}";
 					frameScheduler = new FrameScheduler(gameSpeed.Timestep, LobbyInfo.GlobalSettings.NetFrameInterval,
 						firstFrame + OrderLatency, validConns.Select(c => c.PlayerIndex), Settings.MaxPlayerLag,
-						index => LobbyInfo.ClientWithIndex(index)?.Name ?? $"client {index}",
-						message => Log.Write("server", message), spectators, Settings.MinGameSpeed);
+						DescribeClient, message => Log.Write("server", message), spectators, Settings.MinGameSpeed);
+
+					var voteKickSlowest = Settings.VoteKickSlowest && Settings.EnableVoteKick;
+					if (voteKickSlowest)
+						slowestPlayerVote = new SlowestPlayerVote(this);
+
+					if (Settings.AnnounceGameSpeed)
+						speedAnnouncer = new GameSpeedAnnouncer(Settings.NameSlowestPlayer,
+							voteKickSlowest ? $"Type {SlowestPlayerVote.Command} to vote to kick the slowest player." : null, DescribeClient);
 				}
 			}
 		}

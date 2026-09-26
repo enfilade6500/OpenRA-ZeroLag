@@ -99,6 +99,7 @@ namespace OpenRA.Server
 			public int FallingBehindIntervals;
 			public int BehindIntervals;
 			public readonly Queue<(long Time, int Frame)> Progress = new();
+			public bool IsSpectator;
 		}
 
 		readonly Dictionary<int, ClientState> clients = new();
@@ -132,8 +133,12 @@ namespace OpenRA.Server
 		/// game is slowed down for everyone. 0 slows the game down as soon as a player can't keep up.</param>
 		/// <param name="describeClient">Returns a player's name, for the log.</param>
 		/// <param name="log">Writes a line to the server log (not to the players).</param>
+		/// <param name="spectatorIndices">Clients watching rather than playing. Their orders are still relayed and kept
+		/// in lockstep, but the game never waits for them and is never slowed down for them: a spectator who cannot keep
+		/// up simply falls behind on their own.</param>
 		public FrameScheduler(int timestep, int netFrameInterval, int firstFrame, IEnumerable<int> clientIndices,
-			int maxPlayerLag = 0, Func<int, string> describeClient = null, Action<string> log = null)
+			int maxPlayerLag = 0, Func<int, string> describeClient = null, Action<string> log = null,
+			IEnumerable<int> spectatorIndices = null)
 		{
 			this.timestep = timestep;
 			this.netFrameInterval = netFrameInterval;
@@ -153,6 +158,11 @@ namespace OpenRA.Server
 
 			foreach (var c in clientIndices)
 				clients.TryAdd(c, new ClientState());
+
+			if (spectatorIndices != null)
+				foreach (var c in spectatorIndices)
+					if (clients.TryGetValue(c, out var state))
+						state.IsSpectator = true;
 		}
 
 		double FramePeriod => netFrameInterval * timestep * pace;
@@ -238,7 +248,7 @@ namespace OpenRA.Server
 				return false;
 
 			// Last resort: don't run further ahead of a client than it can possibly be buffering
-			var waitingFor = clients.Where(c => nextFrame - c.Value.LastReportedFrame > WindowFrames(c.Value)).Select(c => c.Key).ToList();
+			var waitingFor = clients.Where(c => !c.Value.IsSpectator && nextFrame - c.Value.LastReportedFrame > WindowFrames(c.Value)).Select(c => c.Key).ToList();
 			var wasBlocked = blocked;
 			blocked = waitingFor.Count > 0;
 			if (blocked)
@@ -339,7 +349,7 @@ namespace OpenRA.Server
 			foreach (var (index, b) in behind)
 			{
 				var state = clients[index];
-				if (b <= lagBudget)
+				if (state.IsSpectator || b <= lagBudget)
 					continue;
 
 				if (state.FallingBehindIntervals < FallingBehindIntervalsBeforePaceChange && state.BehindIntervals < BehindIntervalsBeforePaceChange)
@@ -366,11 +376,12 @@ namespace OpenRA.Server
 
 			// Probe back towards full speed once every client is keeping up (a client that sent nothing
 			// this interval may be stuck, so wait until it reports again)
-			if (!cannotKeepUp && pace > 1f && behind.Count == clients.Count)
+			var playerBehind = behind.Where(b => !clients[b.Key].IsSpectator).Select(b => b.Value).ToList();
+			if (!cannotKeepUp && pace > 1f && playerBehind.Count == clients.Values.Count(c => !c.IsSpectator))
 			{
-				if (behind.Values.All(b => b <= nominalPeriod))
+				if (playerBehind.All(b => b <= nominalPeriod))
 					pace = Math.Max(1f, pace - PaceFastDownStep);
-				else if (behind.Values.All(b => b <= lagBudget))
+				else if (playerBehind.All(b => b <= lagBudget))
 					pace = Math.Max(1f, pace - PaceDownStep);
 
 				if (pace == 1f && oldPace > 1f)
@@ -385,7 +396,8 @@ namespace OpenRA.Server
 				{
 					nextBehindReport = now + ReportInterval;
 					var speed = pace > 1f ? $" Game speed {100 / pace:F0}%." : "";
-					log("Players behind: " + string.Join(", ", lagging.Select(b => $"{describeClient(b.Key)} {b.Value / 1000f:F1}s")) + "." + speed);
+					log("Players behind: " + string.Join(", ", lagging.Select(b =>
+						$"{describeClient(b.Key)}{(clients[b.Key].IsSpectator ? " (spectator)" : "")} {b.Value / 1000f:F1}s")) + "." + speed);
 				}
 			}
 

@@ -1455,10 +1455,15 @@ namespace OpenRA.Server
 				// In multiplayer games the server assigns orders to frames on its own clock from here on,
 				// so that one client's late orders don't hold up everyone else
 				if (IsMultiplayer && GameSave == null)
+				{
+					var validConns = Conns.Where(c => c.Validated).ToList();
+					var spectators = validConns.Select(c => c.PlayerIndex)
+						.Where(i => LobbyInfo.ClientWithIndex(i)?.IsObserver ?? false);
 					frameScheduler = new FrameScheduler(gameSpeed.Timestep, LobbyInfo.GlobalSettings.NetFrameInterval,
-						firstFrame + OrderLatency, Conns.Where(c => c.Validated).Select(c => c.PlayerIndex), Settings.MaxPlayerLag,
+						firstFrame + OrderLatency, validConns.Select(c => c.PlayerIndex), Settings.MaxPlayerLag,
 						index => LobbyInfo.ClientWithIndex(index)?.Name ?? $"client {index}",
-						message => Log.Write("server", message));
+						message => Log.Write("server", message), spectators);
+				}
 			}
 		}
 

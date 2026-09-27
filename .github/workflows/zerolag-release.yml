@@ -51,6 +51,8 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#zerolag-}"
           notes="Server-side build of ZeroLag ${version} for OpenRA release-20250330. Replace your server's OpenRA.Game.dll with this one (see SERVER-INSTALL.md); players need nothing."
+          prerelease=""
+          case "$version" in *-*) prerelease="--prerelease" ;; esac   # v2.6-rc1 and the like
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
-            || gh release create "$GITHUB_REF_NAME" --title "ZeroLag Server ${version}" --notes "$notes" --generate-notes --verify-tag
+            || gh release create "$GITHUB_REF_NAME" --title "ZeroLag Server ${version}" --notes "$notes" --generate-notes --verify-tag $prerelease
           gh release upload "$GITHUB_REF_NAME" dist/OpenRA.Game.dll dist/OpenRA.Game.dll.sha256 dist/SERVER-INSTALL.md --clobber

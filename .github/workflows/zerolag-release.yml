@@ -22,6 +22,8 @@ jobs:
 
       - name: Clone Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the build stamps "git describe" (tag + commits since) into the DLL
 
       - name: Install .NET 6.0
         uses: actions/setup-dotnet@v4

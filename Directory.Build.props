@@ -23,6 +23,15 @@
     <NuGetAudit>false</NuGetAudit>
   </PropertyGroup>
 
+  <!-- The ZeroLag version, as "git describe" reports it (e.g. zerolag-v2.6-rc1-3-gabcdef0). The Makefile passes it in;
+    other builds record "unknown". The server writes it to its log at startup. -->
+  <PropertyGroup>
+    <ZeroLagVersion Condition="'$(ZeroLagVersion)' == ''">unknown</ZeroLagVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <AssemblyMetadata Include="ZeroLagVersion" Value="$(ZeroLagVersion)" />
+  </ItemGroup>
+
   <PropertyGroup>
     <TargetFramework Condition="'$(MSBuildRuntimeType)'!='Mono'">net6.0</TargetFramework>
     <TargetFramework Condition="'$(MSBuildRuntimeType)'=='Mono'">netstandard2.1</TargetFramework>

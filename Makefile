@@ -63,6 +63,7 @@ ARCH_X64 = $(shell echo ${DOTNET_RID} | grep x64)
 
 # Only for use in target version:
 VERSION := $(shell git name-rev --name-only --tags --no-undefined HEAD 2>/dev/null || (c=$$(git rev-parse --short HEAD 2>/dev/null) && echo git-$$c))
+ZEROLAG_VERSION ?= $(shell git describe --tags --match 'zerolag-v*' --always --dirty 2>/dev/null || echo unknown)
 
 # Detect target platform for dependencies if not given by the user
 ifndef TARGETPLATFORM
@@ -93,9 +94,9 @@ all:
 	@echo "Compiling in ${CONFIGURATION} mode..."
 ifeq ($(RUNTIME), mono)
 	@command -v $(firstword $(MSBUILD)) >/dev/null || (echo "OpenRA requires the '$(MSBUILD)' tool provided by Mono >= 6.12."; exit 1)
-	@$(MSBUILD) -t:Build -restore -p:Configuration=${CONFIGURATION} -p:TargetPlatform=$(TARGETPLATFORM)
+	@$(MSBUILD) -t:Build -restore -p:Configuration=${CONFIGURATION} -p:TargetPlatform=$(TARGETPLATFORM) -p:ZeroLagVersion=$(ZEROLAG_VERSION)
 else
-	@$(DOTNET) build -c ${CONFIGURATION} -nologo -p:TargetPlatform=$(TARGETPLATFORM)
+	@$(DOTNET) build -c ${CONFIGURATION} -nologo -p:TargetPlatform=$(TARGETPLATFORM) -p:ZeroLagVersion=$(ZEROLAG_VERSION)
 endif
 ifeq ($(TARGETPLATFORM), unix-generic)
 	@./configure-system-libraries.sh

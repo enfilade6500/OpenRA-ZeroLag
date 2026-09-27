@@ -10,6 +10,7 @@ REF=/home/claude/netref6/usr/lib/dotnet/packs/Microsoft.NETCore.App.Ref/6.0.36/r
 RSP=$(mktemp)
 AI=$(mktemp --suffix=.cs)
 REV=$(git -C "$SRC" rev-parse HEAD 2>/dev/null || echo unknown)
+ZLV=$(git -C "$SRC" describe --tags --match 'zerolag-v*' --always --dirty 2>/dev/null || echo unknown)
 cat > "$AI" <<CS
 [assembly: System.Reflection.AssemblyCompany("OpenRA.Game")]
 [assembly: System.Reflection.AssemblyProduct("OpenRA")]
@@ -19,6 +20,7 @@ cat > "$AI" <<CS
 [assembly: System.Reflection.AssemblyFileVersion("1.0.0.0")]
 [assembly: System.Reflection.AssemblyInformationalVersion("1.0.0+$REV")]
 [assembly: System.Runtime.Versioning.TargetFramework(".NETCoreApp,Version=v6.0", FrameworkDisplayName = "")]
+[assembly: System.Reflection.AssemblyMetadata("ZeroLagVersion", "$ZLV")]
 CS
 {
   echo "-nologo -target:library -langversion:9 -unsafe+ -optimize+ -nostdlib+"

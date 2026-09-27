@@ -357,6 +357,7 @@ namespace OpenRA.Server
 
 				Log.Write("server", $"Initial mod: {ModData.Manifest.Id}");
 				Log.Write("server", $"Initial map: {LobbyInfo.GlobalSettings.Map}");
+				Log.Write("server", $"ZeroLag {ZeroLag.Version} on {ModData.Manifest.Metadata.Version}: {ZeroLag.DescribeSettings(Settings)}");
 
 				while (true)
 				{

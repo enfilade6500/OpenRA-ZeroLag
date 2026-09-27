@@ -40,8 +40,9 @@ via vote-kick whether to wait — the log names who is slowing the game and by h
 host can set `Server.MinGameSpeed` (e.g. 75) to protect the majority instead: a player
 who would need the game slower than that is left to fall behind on their own (which, for
 that player, is much like being kicked, so it is off by default). `Server.MaxPlayerLag`
-(ms) lets a slow player absorb that much lag alone before any shared slowdown starts,
-which covers temporary load such as big battles. A player who is still sending frames,
+(ms) lets a slow player absorb that much lag alone before any shared slowdown starts;
+the default of 3 s covers temporary load such as big battles, at the cost of that player
+feeling their own delay while they are behind. A player who is still sending frames,
 however slowly, never pauses the game; only a player who has stopped responding does
 (which keeps the connection-problems / vote-kick flow).
 
@@ -109,7 +110,7 @@ edge.
 | Setting | Default | Meaning |
 |---|---|---|
 | `Server.Netcode` | `dynamic` | `dynamic` = server-clock scheduler; `classic` = fixed-latency relay. |
-| `Server.MaxPlayerLag` | `0` | ms a slow-PC player may fall behind before the whole game is slowed. |
+| `Server.MaxPlayerLag` | `3000` | ms a slow-PC player may fall behind (lagging alone) before the whole game is slowed for them. |
 | `Server.MinGameSpeed` | `0` | `0` = no floor (follow the slowest PC, as stock does). `75` = never slow below 75%; a PC needing less lags alone. `100` = never slow anyone. |
 | `Server.AnnounceGameSpeed` | `True` | Tell players in the chat when the game slows down / speeds up (rate-limited). The slow player is told privately. `!speed` always works. |
 | `Server.NameSlowestPlayer` | `False` | Name the player the game is slowed down for in the public chat messages and in `!speed` replies. |

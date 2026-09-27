@@ -111,9 +111,10 @@ namespace OpenRA
 		public int MinGameSpeed = 0;
 
 		[Desc("Multiplayer games: how far behind (in milliseconds) a player whose computer can't keep up may fall " +
-			"before the game is slowed down for everyone. While behind, only that player's orders take longer to take effect. " +
-			"0 slows the game down for everyone as soon as a player can't keep up.")]
-		public int MaxPlayerLag = 0;
+			"before the game is slowed down for everyone. While behind, only that player's orders take longer to take effect, " +
+			"so temporary dips (big battles) usually never touch the other players. 0 slows the game down for everyone " +
+			"as soon as a player can't keep up.")]
+		public int MaxPlayerLag = 3000;
 
 		[Desc("Multiplayer games: tell the players in the game chat when the game is slowed down for a slow computer " +
 			"and when it is back to full speed (at most one message every 30 seconds). The player concerned is told " +

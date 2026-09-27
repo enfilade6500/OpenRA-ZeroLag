@@ -56,7 +56,7 @@ server. See [SERVER-INSTALL.md](SERVER-INSTALL.md) for a step-by-step version wi
 | Setting | Default | Meaning |
 |---|---|---|
 | `Server.Netcode` | `dynamic` | `dynamic` = ZeroLag scheduling; `classic` = the original fixed-latency relay, for A/B testing or rollback without swapping files. |
-| `Server.MaxPlayerLag` | `0` | Milliseconds a slow-PC player may fall behind (absorbing the lag alone) before the whole game is slowed for them. `3000` protects the other players from temporary dips such as big battles. |
+| `Server.MaxPlayerLag` | `3000` | Milliseconds a slow-PC player may fall behind (absorbing the lag alone) before the whole game is slowed for them. 3 s means temporary dips such as big battles usually never touch the other players; `0` slows everyone as soon as anyone falls behind. |
 | `Server.MinGameSpeed` | `0` | `0` = no floor: the game follows the slowest computer, as stock does. `75` = never slow below 75%; a computer that needs less is left to fall behind on its own (for that player it is much like being kicked). |
 | `Server.AnnounceGameSpeed` | `True` | Chat messages when the game slows down or speeds up (at most one every 30 s). |
 | `Server.NameSlowestPlayer` | `False` | Name the player the game is slowed down for in those messages. |

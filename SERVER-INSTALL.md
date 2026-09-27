@@ -57,7 +57,7 @@ Passed like any other server setting (command line, `settings.yaml`, or your ser
 environment file):
 
 ```
-Server.MaxPlayerLag=3000        # let a slow PC lag alone for 3 s before slowing everyone
+Server.MaxPlayerLag=0           # slow everyone as soon as a PC falls behind (default: it may lag alone for 3 s first)
 Server.VoteKickSlowest=True     # players can type !kickslow
 Server.NameSlowestPlayer=True   # chat messages name the slow player
 Server.AnnounceGameSpeed=False  # no chat messages about game speed (log only)
@@ -67,7 +67,7 @@ Server.ZeroLagNotice=False      # no "this is a ZeroLag server" line when player
 ```
 
 The README explains each one. Defaults are: announcements on, nobody named, no vote, no
-floor, no lag budget, join notice on.
+floor, a 3 s lag budget, join notice on.
 
 Players joining the lobby get your server's message of the day (`motd.txt` in the
 server's support directory, re-read on every join) followed by a one-line ZeroLag notice

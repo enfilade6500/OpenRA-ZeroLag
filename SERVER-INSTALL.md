@@ -69,11 +69,6 @@ Server.ZeroLagNotice=True       # add a "this is a ZeroLag server, type !speed" 
 The README explains each one. Defaults are: announcements on, nobody named, no vote, no
 floor, a 3 s lag budget, join notice off.
 
-Players joining the lobby get your server's message of the day, `motd.txt` in the
-server's support directory (re-read on every join, so edits apply immediately). With
-`Server.ZeroLagNotice=True` the server also sends a one-line notice after it, saying
-that this is a ZeroLag server and which chat commands exist.
-
 ## Rolling back
 
 ```sh

@@ -9,6 +9,7 @@
  */
 #endregion
 
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using NUnit.Framework;
@@ -269,14 +270,14 @@ namespace OpenRA.Test
 				{
 					Inbox.Dequeue();
 					s.ReceivePacket(Index, NextFrame++, Order, now);
-					var tick = System.Math.Max(TickMs, timestep / Capacity);
-					NextFrameTime = System.Math.Max(NextFrameTime, now) + tick * netFrameInterval;
+					var tick = Math.Max(TickMs, timestep / Capacity);
+					NextFrameTime = Math.Max(NextFrameTime, now) + (tick * netFrameInterval);
 				}
 			}
 		}
 
 		static (List<string> Logs, FrameScheduler Scheduler, List<SimClient> Clients) RunWithCapacities(
-			double[] capacities, long duration, int minGameSpeed, System.Action<long, List<SimClient>, FrameScheduler> onSecond = null)
+			double[] capacities, long duration, int minGameSpeed, Action<long, List<SimClient>, FrameScheduler> onSecond = null)
 		{
 			const int Timestep = 40, Interval = 3, First = 4, Delay = 20;
 			var logs = new List<string>();
@@ -300,7 +301,7 @@ namespace OpenRA.Test
 					c.Run(s, t, Timestep, Interval);
 
 				foreach (var (client, scale) in s.GetTickScales(t))
-					clients[client].TickMs = System.Math.Max((int)(scale * Timestep), 1);
+					clients[client].TickMs = Math.Max((int)(scale * Timestep), 1);
 
 				if (t % 1000 == 0)
 					onSecond?.Invoke(t, clients, s);
@@ -324,19 +325,19 @@ namespace OpenRA.Test
 				{
 					if (sched.SlowestPlayer.HasValue)
 						seenSlowest.Add(sched.SlowestPlayer.Value.Client);
-					minSpeed = System.Math.Min(minSpeed, sched.SpeedPercent);
+					minSpeed = Math.Min(minSpeed, sched.SpeedPercent);
 				}
 			});
 
 			Assert.That(seenSlowest, Is.EquivalentTo(new[] { 1 }), "Only the slow computer should be reported as the slowest player.");
 			Assert.That(minSpeed, Is.InRange(70, 85), "The game should slow to about the slow computer's speed.");
-			Assert.That(logs.Any(l => l.StartsWith("Slowing the game") && l.Contains("P1")), Is.True);
+			Assert.That(logs.Any(l => l.StartsWith("Slowing the game", StringComparison.Ordinal) && l.Contains("P1")), Is.True);
 			Assert.That(s.SpeedPercent, Is.EqualTo(100), "Speed should be back to normal once the slow computer recovered.");
 			Assert.That(s.SlowestPlayer, Is.Null);
 			Assert.That(clients.Min(c => c.NextFrame), Is.GreaterThan(700), "The game should keep progressing.");
 
 			s.RemoveClient(1);
-			Assert.That(logs.Last(l => l.StartsWith("Summary for P1")), Does.Contain("while it was slowing the game"));
+			Assert.That(logs.Last(l => l.StartsWith("Summary for P1", StringComparison.Ordinal)), Does.Contain("while it was slowing the game"));
 		}
 
 		[Test]
@@ -354,7 +355,8 @@ namespace OpenRA.Test
 			});
 
 			Assert.That(speedAfterKick.Select(x => x.Speed), Is.All.EqualTo(100), "Speed should be 100% from the first second after the kick.");
-			Assert.That(speedAfterKick.Skip(1).Select(x => x.Tick0), Is.All.LessThanOrEqualTo(40), "The remaining players should run at normal tick length right after the kick.");
+			Assert.That(speedAfterKick.Skip(1).Select(x => x.Tick0), Is.All.LessThanOrEqualTo(40),
+				"The remaining players should run at normal tick length right after the kick.");
 			Assert.That(logs.Any(l => l.Contains("P1 has left; the game is back to full speed")), Is.True);
 		}
 
@@ -370,9 +372,9 @@ namespace OpenRA.Test
 			});
 
 			s.RemoveClient(1);
-			var summary = logs.Last(l => l.StartsWith("Summary for P1"));
+			var summary = logs.Last(l => l.StartsWith("Summary for P1", StringComparison.Ordinal));
 			Assert.That(summary, Does.Contain("at least").And.Not.Contain("while it was slowing the game"));
-			Assert.That(logs.Any(l => l.StartsWith("Slowing the game")), Is.False, "A hitch must not slow the game.");
+			Assert.That(logs.Any(l => l.StartsWith("Slowing the game", StringComparison.Ordinal)), Is.False, "A hitch must not slow the game.");
 		}
 
 		[Test]
@@ -414,7 +416,7 @@ namespace OpenRA.Test
 			for (long t = 151000; t < 300000; t += 1000)
 				Step(t, 100);
 			Assert.That(messages.Count - lastBefore, Is.EqualTo(1), "Sustained full speed should be announced exactly once.");
-			Assert.That(messages.Last().M, Is.EqualTo("The game is back to full speed."));
+			Assert.That(messages[^1].M, Is.EqualTo("The game is back to full speed."));
 
 			var kick = new GameSpeedAnnouncer(false, null, i => $"P{i}");
 			kick.Tick(0, 80, 1, 0, -1, 10);

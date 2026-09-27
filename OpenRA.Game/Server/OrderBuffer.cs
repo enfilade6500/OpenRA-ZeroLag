@@ -17,13 +17,16 @@ using System.Linq;
 namespace OpenRA.Server
 {
 	/// <summary>
+	/// <para>
 	/// Keeps the clients' simulations in phase by sending each of them a TickScale.
-	///
+	/// </para>
+	/// <para>
 	/// In lockstep every client needs every other client's orders for a frame before it can simulate it,
 	/// so the game runs smoothly only when every client's orders for a frame reach the server at about
 	/// the same time. When one client falls behind (a CPU hitch, a slow link), the others run into its
 	/// missing orders and freeze until they arrive.
-	///
+	/// </para>
+	/// <para>
 	/// Each interval this measures, per frame, how much later each client's orders arrive than the
 	/// earliest client's orders for the same frame, and corrects part of the difference over the next
 	/// interval (correcting all of it at once overshoots, because the measurement lags the correction):
@@ -32,8 +35,10 @@ namespace OpenRA.Server
 	///  * A late client that is starved of data, or that was asked to speed up but could not
 	///    (a CPU-bound machine), sets the pace instead: clients ahead of it are slowed down smoothly,
 	///    which is much less disruptive than letting them repeatedly freeze.
-	///
+	/// </para>
+	/// <para>
 	/// Release clients accept any TickScale value; only this server-side policy decides what to send.
+	/// </para>
 	/// </summary>
 	public class OrderBuffer
 	{

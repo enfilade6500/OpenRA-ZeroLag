@@ -17,26 +17,32 @@ using System.Linq;
 namespace OpenRA.Server
 {
 	/// <summary>
+	/// <para>
 	/// Decides which orders go into which frame, on the server's own clock.
-	///
+	/// </para>
+	/// <para>
 	/// With the original scheme every client's packet for its local frame N was scheduled for frame
 	/// N + OrderLatency, so every client needed every other client's packet for a frame before it could
 	/// continue: one player's late packet froze the whole game.
-	///
+	/// </para>
+	/// <para>
 	/// Here the server "closes" one frame every net frame interval. A frame contains, for each client,
 	/// everything that client has sent since the previous frame was closed: nothing if its packet has not
 	/// arrived yet, or several packets merged together if it is catching up. A client with a slow or
 	/// unreliable connection therefore only delays its own orders and its own view of the game; everyone
 	/// else keeps playing.
-	///
+	/// </para>
+	/// <para>
 	/// Unmodified release clients support this without changes: frames are still sent to each client
 	/// strictly in order with no gaps, and the sender learns which frame its packets were applied on from
 	/// the existing Ack packet, whose count may be 0 (an empty frame) or more than 1 (merged packets).
-	///
+	/// </para>
+	/// <para>
 	/// Spectators, and players who have been defeated, are kept in lockstep and relayed like everyone else,
 	/// but the game never waits for them and is never slowed down for them: if they cannot keep up they
 	/// fall behind on their own.
-	///
+	/// </para>
+	/// <para>
 	/// Each client's playback is kept a small, steady distance behind the frames it receives by sending
 	/// it a TickScale, so it neither runs dry nor builds up delay. A client that falls behind (a hitch,
 	/// a burst of delayed packets) is told to run faster until it has caught up. If a client cannot keep
@@ -44,11 +50,13 @@ namespace OpenRA.Server
 	/// everyone instead, but never below a configurable floor (Server.MinGameSpeed): a player whose computer
 	/// would need the game slower than that is left to fall behind on their own, like a spectator, rather than
 	/// dragging everyone down to a pace that would not have kept them in the game anyway.
-	///
+	/// </para>
+	/// <para>
 	/// As a last resort, the server stops closing frames while a player has stopped responding and is far
 	/// behind, which is the same "wait for everyone" behaviour as the original scheme and keeps the familiar
 	/// connection-problems / vote-kick flow. A player who is still sending frames, however slowly, never
 	/// holds the game.
+	/// </para>
 	/// </summary>
 	public sealed class FrameScheduler
 	{
@@ -614,8 +622,7 @@ namespace OpenRA.Server
 				{
 					nextBehindReport = now + ReportInterval;
 					var speed = pace > 1f ? $" Game speed {100 / pace:F0}%." : "";
-					log("Players behind: " + string.Join(", ", lagging.Select(b =>
-						$"{describeClient(b.Key)}{(clients[b.Key].IsSpectator ? " (spectator)" : clients[b.Key].IsDefeated ? " (defeated)" : clients[b.Key].IsTooSlow ? " (too slow)" : "")} {b.Value / 1000f:F1}s")) + "." + speed);
+					log("Players behind: " + string.Join(", ", lagging.Select(b => $"{describeClient(b.Key)}{Role(clients[b.Key])} {b.Value / 1000f:F1}s")) + "." + speed);
 				}
 			}
 
@@ -650,6 +657,9 @@ namespace OpenRA.Server
 
 			return result;
 		}
+
+		static string Role(ClientState state) =>
+			state.IsSpectator ? " (spectator)" : state.IsDefeated ? " (defeated)" : state.IsTooSlow ? " (too slow)" : "";
 
 		static long Median(List<long> values)
 		{

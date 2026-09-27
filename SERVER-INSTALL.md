@@ -63,16 +63,17 @@ Server.NameSlowestPlayer=True   # chat messages name the slow player
 Server.AnnounceGameSpeed=False  # no chat messages about game speed (log only)
 Server.MinGameSpeed=75          # never slow below 75%; a slower PC is left behind instead
 Server.Netcode=classic          # original behaviour, without swapping the file back
-Server.ZeroLagNotice=False      # no "this is a ZeroLag server" line when players join
+Server.ZeroLagNotice=True       # add a "this is a ZeroLag server, type !speed" line when players join
 ```
 
 The README explains each one. Defaults are: announcements on, nobody named, no vote, no
-floor, a 3 s lag budget, join notice on.
+floor, a 3 s lag budget, join notice off.
 
-Players joining the lobby get your server's message of the day (`motd.txt` in the
-server's support directory, re-read on every join) followed by a one-line ZeroLag notice
-naming the chat commands. If you would rather explain it in your own words, put that in
-`motd.txt` and set `Server.ZeroLagNotice=False`.
+Players joining the lobby get your server's message of the day: `motd.txt` in the
+server's support directory, re-read on every join, so it is the natural place to tell
+them what is different on this server (for example that `!speed` exists). If you would
+rather have the server say it, `Server.ZeroLagNotice=True` adds a one-line notice after
+the message of the day.
 
 ## Rolling back
 

@@ -67,6 +67,7 @@ namespace OpenRA.Server
 			slowestPlayerGone = true;
 		}
 
+		/// <summary>Creates an announcer for one game.</summary>
 		/// <param name="namePlayer">Name the player the game is slowed down for. Otherwise they are only told privately.</param>
 		/// <param name="voteHint">Appended to slowdown messages (e.g. how to vote to kick the slowest player), or null.</param>
 		/// <param name="describeClient">Returns a player's name.</param>

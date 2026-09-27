@@ -205,6 +205,7 @@ namespace OpenRA.Server
 		/// <summary>The lowest game speed (percent) the scheduler will slow the game to; 100 / maxPace.</summary>
 		public int MinSpeedPercent => (int)Math.Round(100 / maxPace);
 
+		/// <summary>Creates a scheduler for one game.</summary>
 		/// <param name="timestep">World tick length for the selected game speed (ms).</param>
 		/// <param name="netFrameInterval">World ticks per network frame.</param>
 		/// <param name="firstFrame">The first frame that this scheduler will close (the frames before it were sent at game start).</param>

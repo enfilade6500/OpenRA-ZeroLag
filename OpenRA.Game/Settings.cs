@@ -130,8 +130,7 @@ namespace OpenRA
 		public bool VoteKickSlowest = false;
 
 		[Desc("Tell each player, when they join the lobby, that this server runs ZeroLag and which chat commands exist. " +
-			"Sent after the message of the day (motd.txt). Off by default: it is your server, so say it your own way in " +
-			"motd.txt if you prefer.")]
+			"Sent after the message of the day (motd.txt).")]
 		public bool ZeroLagNotice = false;
 
 		[Desc("For dedicated servers only, treat maps that fail the lint checks as invalid.")]

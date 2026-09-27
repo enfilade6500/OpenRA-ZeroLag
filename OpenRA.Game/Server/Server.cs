@@ -612,6 +612,16 @@ namespace OpenRA.Server
 								SendOrderTo(newConn, "Message", motd);
 						}
 
+						// Players should know that the rules of lag have changed on this server, and what they can type
+						if (Settings.ZeroLagNotice && !string.Equals(Settings.Netcode, "classic", StringComparison.OrdinalIgnoreCase))
+						{
+							var notice = "This is a ZeroLag server: another player's lag can't freeze your game. In game, type !speed to see the game speed";
+							notice += Settings.VoteKickSlowest && Settings.EnableVoteKick
+								? ", or !kickslow to vote to kick the player the game is being slowed down for."
+								: ".";
+							SendOrderTo(newConn, "Message", notice);
+						}
+
 						if ((LobbyInfo.GlobalSettings.MapStatus & Session.MapStatus.UnsafeCustomRules) != 0)
 							SendFluentMessageTo(newConn, CustomRules);
 

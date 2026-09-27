@@ -128,6 +128,10 @@ namespace OpenRA
 			"cooldown rules as the normal vote kick, and requires EnableVoteKick.")]
 		public bool VoteKickSlowest = false;
 
+		[Desc("Tell each player, when they join the lobby, that this server runs ZeroLag and which chat commands exist. " +
+			"Sent in addition to the message of the day (motd.txt); turn it off to say it in your own words there.")]
+		public bool ZeroLagNotice = true;
+
 		[Desc("For dedicated servers only, treat maps that fail the lint checks as invalid.")]
 		public bool EnableLintChecks = true;
 

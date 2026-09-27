@@ -250,7 +250,7 @@ static class Tests
 				Inbox.Dequeue();
 				s.ReceivePacket(Index, NextFrame++, Order, now);
 				var tick = Math.Max(TickMs, timestep / Capacity);
-				NextFrameTime = Math.Max(NextFrameTime, now) + tick * netFrameInterval;
+				NextFrameTime = Math.Max(NextFrameTime, now) + (tick * netFrameInterval);
 			}
 		}
 	}

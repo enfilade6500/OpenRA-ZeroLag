@@ -105,16 +105,32 @@ namespace OpenRA
 
 		[Desc("Multiplayer games: the game is never slowed down below this percentage of normal speed to accommodate a " +
 			"player whose computer can't keep up; a player who would need it slower is left to fall behind on their own " +
-			"instead (which, for that player, is much like being kicked). 0 (default) means no floor: as in the original " +
-			"game, the game follows the slowest player's computer however slow it is, smoothly rather than stuttering, " +
-			"and it is up to the players to vote-kick if they would rather not wait.")]
-		public int MinGameSpeed = 0;
+			"instead, and catches back up if their computer recovers. 50 (default) protects the other players from a game " +
+			"at a crawl. 0 means no floor: as in the original game, the game follows the slowest player's computer however " +
+			"slow it is, smoothly rather than stuttering, and it is up to the players to vote-kick if they would rather not wait.")]
+		public int MinGameSpeed = 50;
 
 		[Desc("Multiplayer games: how far behind (in milliseconds) a player whose computer can't keep up may fall " +
 			"before the game is slowed down for everyone. While behind, only that player's orders take longer to take effect, " +
 			"so temporary dips (big battles) usually never touch the other players. 0 slows the game down for everyone " +
 			"as soon as a player can't keep up.")]
 		public int MaxPlayerLag = 3000;
+
+		[Desc("Multiplayer games: the largest buffer (in milliseconds) the server builds for a player whose connection drops " +
+			"out, so that their game keeps running through dropouts of up to that length. The cost is that player's own " +
+			"input delay, which grows by the same amount; nobody else is affected. The buffer shrinks again while the " +
+			"connection is quiet, and the player can turn it off or set it by hand with !buffer. 0 disables it.")]
+		public int MaxPlayerBuffer = 1500;
+
+		[Desc("Multiplayer games: the fastest speed, as a percentage of normal, that a player who has fallen well behind " +
+			"(after a dropout, or after being left behind by MinGameSpeed) is asked to run at to catch up. Players slightly " +
+			"behind are always asked for less; the real limit is what their computer can do.")]
+		public int MaxCatchUpSpeed = 400;
+
+		[Desc("Multiplayer games: the longest the game pauses for everyone (in milliseconds) when a player who was keeping up " +
+			"stops responding, before continuing without them; if they come back they catch up. The pause only starts once " +
+			"the player has been silent for a few seconds. 0 never pauses the game for anyone.")]
+		public int MaxWaitForStalledPlayer = 3000;
 
 		[Desc("Multiplayer games: tell the players in the game chat when the game is slowed down for a slow computer " +
 			"and when it is back to full speed (at most one message every 30 seconds). The player concerned is told " +

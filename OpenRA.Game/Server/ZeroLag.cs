@@ -23,7 +23,8 @@ namespace OpenRA.Server
 
 		/// <summary>The settings that change what the server log means, for the top of the log.</summary>
 		public static string DescribeSettings(ServerSettings s) =>
-			$"Netcode={s.Netcode} MaxPlayerLag={s.MaxPlayerLag} MinGameSpeed={s.MinGameSpeed} AnnounceGameSpeed={s.AnnounceGameSpeed} " +
+			$"Netcode={s.Netcode} MaxPlayerLag={s.MaxPlayerLag} MinGameSpeed={s.MinGameSpeed} MaxPlayerBuffer={s.MaxPlayerBuffer} " +
+			$"MaxCatchUpSpeed={s.MaxCatchUpSpeed} MaxWaitForStalledPlayer={s.MaxWaitForStalledPlayer} AnnounceGameSpeed={s.AnnounceGameSpeed} " +
 			$"NameSlowestPlayer={s.NameSlowestPlayer} VoteKickSlowest={s.VoteKickSlowest} EnableVoteKick={s.EnableVoteKick} ZeroLagNotice={s.ZeroLagNotice}";
 	}
 }

@@ -43,26 +43,34 @@ namespace OpenRA.Server
 	/// fall behind on their own.
 	/// </para>
 	/// <para>
-	/// Each client's playback is kept a small, steady distance behind the frames it receives by sending
-	/// it a TickScale, so it neither runs dry nor builds up delay. A client that falls behind (a hitch,
-	/// a burst of delayed packets) is told to run faster until it has caught up. If a client cannot keep
-	/// up even when running faster (its computer is too slow), the whole game is slowed down smoothly for
-	/// everyone instead, but never below a configurable floor (Server.MinGameSpeed): a player whose computer
-	/// would need the game slower than that is left to fall behind on their own, like a spectator, rather than
-	/// dragging everyone down to a pace that would not have kept them in the game anyway.
+	/// Each client's playback is kept a steady distance behind the frames it receives by sending it a
+	/// TickScale, so it neither runs dry nor builds up delay. That distance is small (150 ms) for a good
+	/// connection and grows, up to Server.MaxPlayerBuffer, for a connection whose dropouts have stopped the
+	/// client's game: the time a dropout cost is turned into buffer, so that the next dropout of that length
+	/// is played through instead. A client that has fallen behind (a hitch, a dropout longer than its buffer)
+	/// is told to run faster in proportion to how far behind it is, up to Server.MaxCatchUpSpeed.
 	/// </para>
 	/// <para>
-	/// As a last resort, the server stops closing frames while a player has stopped responding and is far
-	/// behind, which is the same "wait for everyone" behaviour as the original scheme and keeps the familiar
-	/// connection-problems / vote-kick flow. A player who is still sending frames, however slowly, never
-	/// holds the game.
+	/// A client's shortfall is attributed before anything acts on it. Gaps in its packet arrivals are holes
+	/// (its connection dropped out, or its game froze); the rest is the smooth shortfall of a computer that
+	/// cannot keep up. Only the smooth shortfall can slow the whole game, which is then slowed smoothly for
+	/// everyone to the rate that computer sustains between holes, but never below Server.MinGameSpeed: a
+	/// player whose computer would need the game slower than that is left to fall behind on their own, like
+	/// a spectator, and catches back up if its load drops. The game speeds back up by probing: gently at
+	/// first, faster while it succeeds, and after a failed probe it waits before trying again.
+	/// </para>
+	/// <para>
+	/// As a last resort, the server stops closing frames while a player who was keeping up has stopped
+	/// responding and is far behind, for at most Server.MaxWaitForStalledPlayer, and then continues without
+	/// them. A player who is still sending frames, however slowly, never holds the game.
 	/// </para>
 	/// </summary>
 	public sealed class FrameScheduler
 	{
-		// How long a frame should wait in a client's buffer before the client needs it (ms).
-		// This absorbs jitter on the connection from the server to the client.
-		const int TargetSlack = 150;
+		// How long a frame should wait in a client's buffer before the client needs it (ms), unless the client's
+		// connection has shown that it needs more (see the adaptive buffer below). This absorbs ordinary jitter
+		// on the connection from the server to the client.
+		const int BaseSlack = 150;
 
 		// Ignore slack errors smaller than this (ms)
 		const int SlackDeadband = 40;
@@ -73,18 +81,66 @@ namespace OpenRA.Server
 		// Correct only part of the measured error per interval, because the measurement lags behind
 		const float Gain = 0.6f;
 
-		// Limits on how much faster / slower a single client can be told to run
+		// Limits on how much faster / slower a single client can be told to run for ordinary corrections. A client
+		// well behind is asked for more, up to Server.MaxCatchUpSpeed (see CatchUpPerSecondBehind below).
 		const float MinTickScale = 0.7f;
 		const float MaxTickScale = 1.6f;
 
-		// Steps for slowing down the whole game for a client that cannot keep up (the limit is Server.MinGameSpeed).
+		// A client far behind is asked to run about (1 + this * seconds behind) times normal speed: half a second behind
+		// is a gentle 1.4x, three seconds is flat out. Because the client is told once per interval, a factor below 1
+		// also means it can close at most its whole deficit per interval, so it cannot overshoot and run dry.
+		const float CatchUpPerSecondBehind = 0.8f;
+
+		// A gap between two packets from a client longer than this many frame periods, and than this multiple of the
+		// client's own typical gap, is a hole: the client sent nothing for that long. Holes are how connection dropouts
+		// (and frozen game windows) show up, as opposed to a client that is merely slow, whose packets keep coming at
+		// a steady but slower cadence (which is why the threshold follows its cadence).
+		const float HoleThresholdPeriods = 2.5f;
+		const float HoleThresholdCadence = 3f;
+		const int CadenceSamples = 24;
+
+		// A second packet within this many ms of the first one after a hole means a burst: everything the client queued
+		// while its upload path was stalled arrives together. Its simulation did not stop, only its packets were held
+		// up. A client that had genuinely stopped resumes one packet per net frame (30 ms even at 4x), never two at once.
+		const int BurstWindowMs = 20;
+
+		// A hole at least this long during which the client's ping replies kept coming was its game freezing (a hitch,
+		// dragging the window), not its connection: pings are answered by the client's network thread. Shorter holes
+		// contain too few pings to tell.
+		const int PongCheckMinHoleMs = 500;
+
+		// Adaptive buffer: a download-side hole that stopped a client's game is turned into buffer, so that the next
+		// hole of that length does not stop it. The buffer shrinks back with this half-life (ms) when the connection
+		// has been quiet, by running the client imperceptibly fast.
+		const int BufferHalfLife = 120000;
+
+		// A player is told once, privately, when their buffer first grows past this (ms); the log notes growth in these steps (ms)
+		const int BufferNoticeThreshold = 400;
+		const int BufferLogStep = 250;
+
+		// Holes are remembered this long (ms) for attribution and the per-player summary
+		const int HoleMemory = 300000;
+
+		// A client behind because of holes is logged as such at most this often (ms)
+		const int HoleReportInterval = 60000;
+
+		// Slowing down the whole game for a client that cannot keep up (the limit is Server.MinGameSpeed).
 		// With no configured floor the game can still not be slowed below this: a computer managing less than
 		// 10% of normal speed is not meaningfully in the game, and longer ticks would be indistinguishable
-		// from a frozen client to the players.
-		const float PaceDownStep = 0.01f;
+		// from a frozen client to the players. The pace is set a little below what the client managed, so
+		// that it can work off its backlog.
 		const float PaceSanityLimit = 10f;
-		const float PaceFastDownStep = 0.03f;
 		const float PaceHeadroom = 0.97f;
+
+		// Speeding back up: the game speed is raised by ProbeRate points per second at first, doubling every
+		// ProbeDoublingTime (ms) while everyone keeps up, up to MaxProbeRate. A slowdown while probing is a failed
+		// probe: the next probe waits MinHold (ms), doubling per failure up to MaxHold. The first slowdown for a
+		// player is never held: it may have been a passing load.
+		const float ProbeRate = 0.5f;
+		const float MaxProbeRate = 4f;
+		const int ProbeDoublingTime = 10000;
+		const int MinHold = 30000;
+		const int MaxHold = 120000;
 
 		// A client counts as unable to keep up after falling further behind for this many intervals in a
 		// row despite being told to run faster. A one-off hitch makes it fall behind once and then recover.
@@ -96,7 +152,7 @@ namespace OpenRA.Server
 		// Stop closing frames while a client is further behind than its normal position plus this (ms),
 		// and has stopped sending. Shorter outages (Wi-Fi dropouts, TCP retransmissions) only affect that
 		// client; the client catches up afterwards by running faster. Longer outages make everyone wait,
-		// like the original scheme.
+		// like the original scheme, but only for up to Server.MaxWaitForStalledPlayer.
 		const int WindowSlack = 2000;
 
 		// A client that has not reported a new frame for this long has stopped (a dead connection or a
@@ -154,6 +210,58 @@ namespace OpenRA.Server
 			public int BehindSamples;
 			public int SlowdownsCaused;
 			public bool Seen;
+
+			// The adaptive buffer: how long frames should wait in this client's buffer (ms)
+			public int TargetSlack = BaseSlack;
+			public BufferMode BufferMode = BufferMode.Auto;
+			public int BufferPeak = BaseSlack;
+			public bool BufferNoticeSent;
+
+			// Hole detection: packet and ping-reply arrival times, the client's usual gap between packets, and the hole being classified
+			public long LastArrivalTime;
+			public readonly Queue<long> RecentGaps = new();
+			public readonly Queue<long> PongTimes = new();
+			public long OpenHoleStart = -1;
+			public long OpenHoleEnd;
+			public int PacketsSinceHole;
+			public readonly Queue<(long End, long Length, HoleKind Kind)> Holes = new();
+			public long LastHoleReport = -1;
+
+			// Summary of the connection
+			public int Dropouts;
+			public long DropoutMs;
+			public long LongestDropout;
+			public int Freezes;
+			public long FreezeMs;
+
+			// The game gave up waiting for this client (it stopped responding for longer than the host allows);
+			// it is not waited for again until it has caught up
+			public bool GaveUpWaiting;
+			public bool WasWithinBudget = true;
+		}
+
+		public enum BufferMode
+		{
+			/// <summary>Grows with the connection's dropouts, shrinks while it is quiet (the default).</summary>
+			Auto,
+
+			/// <summary>The base 150 ms only.</summary>
+			Off,
+
+			/// <summary>Set by the player with !buffer.</summary>
+			Fixed
+		}
+
+		public enum HoleKind
+		{
+			/// <summary>The download path, or the whole connection, stalled: the client had nothing to simulate.</summary>
+			Connection,
+
+			/// <summary>The upload path stalled: the client kept simulating and its queued packets arrived in a burst.</summary>
+			Upload,
+
+			/// <summary>The client's game stopped (a hitch, a dragged window) while its connection kept answering pings.</summary>
+			Freeze
 		}
 
 		readonly Dictionary<int, ClientState> clients = new();
@@ -167,23 +275,34 @@ namespace OpenRA.Server
 		readonly int lagBudget;
 		readonly int windowSlack;
 		readonly float maxPace;
+		readonly int maxPlayerBuffer;
+		readonly float maxCatchUpSpeed;
+		readonly int maxWaitForStalledPlayer;
 		readonly Func<int, string> describeClient;
 		readonly Action<string> log;
+		readonly List<(int Client, string Message)> notices = new();
+		readonly List<int> continuedWithout = new();
 
 		bool started;
+		long startedAt;
 		int nextFrame;
 		double nextCloseTime;
 		long nextControlUpdate;
 		float pace = 1f;
 		bool blocked;
 		long blockedSince;
-		long lastResumeTime = long.MinValue;
+		long lastResumeTime = -1;
 		string blockedBy;
 		int shortWaits;
 		long shortWaitMs;
 		long nextBehindReport;
 		int slowestClient = -1;
 		double slowestClientSpeed;
+		float probeRate;
+		long probeSince;
+		long holdUntil;
+		int holdMs;
+		int holdFor = -1;
 
 		/// <summary>The current game speed as a percentage of normal (100 when the game is not slowed down).</summary>
 		public int SpeedPercent => (int)Math.Round(100 / pace);
@@ -218,17 +337,26 @@ namespace OpenRA.Server
 		/// in lockstep, but the game never waits for them and is never slowed down for them: a spectator who cannot keep
 		/// up simply falls behind on their own.</param>
 		/// <param name="minGameSpeed">The game is never slowed down below this percentage of normal speed for a slow
-		/// computer; a player who would need less is left to fall behind on their own. 0 (the default) means no
-		/// floor: like the original scheme, the game follows the slowest player's computer however slow it is,
-		/// and it is up to the players to vote-kick if they do not want to wait.</param>
+		/// computer; a player who would need less is left to fall behind on their own. 0 means no floor: like the
+		/// original scheme, the game follows the slowest player's computer however slow it is, and it is up to the
+		/// players to vote-kick if they do not want to wait.</param>
+		/// <param name="maxPlayerBuffer">The largest buffer (ms) built for a player whose connection drops out, at the
+		/// cost of that player's own input delay. 0 disables the adaptive buffer (every client keeps the base 150 ms).</param>
+		/// <param name="maxCatchUpSpeed">The fastest speed (percent of normal) a client far behind is asked to run at.</param>
+		/// <param name="maxWaitForStalledPlayer">The longest the game pauses (ms) for a player who was keeping up and has
+		/// stopped responding, before continuing without them. 0 never pauses.</param>
 		public FrameScheduler(int timestep, int netFrameInterval, int firstFrame, IEnumerable<int> clientIndices,
 			int maxPlayerLag = 0, Func<int, string> describeClient = null, Action<string> log = null,
-			IEnumerable<int> spectatorIndices = null, int minGameSpeed = 0)
+			IEnumerable<int> spectatorIndices = null, int minGameSpeed = 0, int maxPlayerBuffer = 1500,
+			int maxCatchUpSpeed = 400, int maxWaitForStalledPlayer = 3000)
 		{
 			maxPace = minGameSpeed <= 0 ? PaceSanityLimit : Math.Min(PaceSanityLimit, 100f / minGameSpeed.Clamp(10, 100));
 			this.timestep = timestep;
 			this.netFrameInterval = netFrameInterval;
 			this.firstFrame = firstFrame;
+			this.maxPlayerBuffer = Math.Max(0, maxPlayerBuffer);
+			this.maxCatchUpSpeed = Math.Max(1 / MinTickScale, maxCatchUpSpeed.Clamp(100, 2000) / 100f);
+			this.maxWaitForStalledPlayer = Math.Max(0, maxWaitForStalledPlayer);
 			this.describeClient = describeClient ?? (c => $"client {c}");
 			this.log = log ?? (_ => { });
 
@@ -266,14 +394,114 @@ namespace OpenRA.Server
 				state.LastProgressTime = now;
 			}
 
+			NoteArrival(client, state, now);
+
 			// The client sends the packet for frame N just before it simulates frame N, so the time frame N
 			// spent in its buffer is the time since we closed it, minus the round trip
 			if (state.HasRtt && clientFrame >= firstFrame && closeTimes.TryGetValue(clientFrame, out var closedAt))
 				state.SlackSamples.Add(now - closedAt - state.Rtt);
 		}
 
-		/// <summary>Round-trip times from the connection's ping history (ms).</summary>
-		public void ReceivePing(int client, int[] pingHistory)
+		// Hole detection. A packet that arrives long after the previous one ends a hole; the packets right after it
+		// tell whether the client had kept simulating meanwhile (a burst of queued packets: its upload path stalled)
+		// or not (its download path stalled, or its game froze). The hole is classified once the burst window has
+		// passed, so that the buffer and the pace logic act on what actually happened.
+		void NoteArrival(int index, ClientState state, long now)
+		{
+			var period = FramePeriod;
+			if (state.OpenHoleStart >= 0)
+			{
+				if (now <= state.OpenHoleEnd + BurstWindowMs)
+					state.PacketsSinceHole++;
+				else
+					CloseHole(index, state, now);
+			}
+
+			// (Not during the first second: the first packets after loading arrive whenever each client is ready)
+			if (state.OpenHoleStart < 0 && started && state.LastArrivalTime > startedAt + Interval)
+			{
+				var gap = now - state.LastArrivalTime;
+				var typical = state.RecentGaps.Count > 0 ? Median(state.RecentGaps) : (long)period;
+				if (gap > HoleThresholdPeriods * period && gap > HoleThresholdCadence * typical)
+				{
+					state.OpenHoleStart = state.LastArrivalTime;
+					state.OpenHoleEnd = now;
+					state.PacketsSinceHole = 1;
+				}
+				else
+				{
+					state.RecentGaps.Enqueue(gap);
+					while (state.RecentGaps.Count > CadenceSamples)
+						state.RecentGaps.Dequeue();
+				}
+			}
+
+			state.LastArrivalTime = now;
+		}
+
+		void CloseHole(int index, ClientState state, long now)
+		{
+			var length = state.OpenHoleEnd - state.OpenHoleStart;
+
+			// The packets that arrived together at the end of the hole were produced while the client was still
+			// playing (from its buffer, or because only its upload path was stalled); the rest of the hole it was
+			// stopped. That stopped part is what a bigger buffer would have covered.
+			var typical = state.RecentGaps.Count > 0 ? Median(state.RecentGaps) : (long)FramePeriod;
+			var stopped = Math.Max(0, length - (state.PacketsSinceHole - 1) * typical);
+			var kind = HoleKind.Connection;
+			if (length >= PongCheckMinHoleMs && state.PongTimes.Any(t => t > state.OpenHoleStart + 150 && t < state.OpenHoleEnd - 50))
+				kind = HoleKind.Freeze;
+			else if (state.PacketsSinceHole >= 2 && stopped < HoleThresholdPeriods * FramePeriod)
+				kind = HoleKind.Upload;
+
+			state.Holes.Enqueue((state.OpenHoleEnd, length, kind));
+			while (state.Holes.Count > 0 && state.Holes.Peek().End < now - HoleMemory)
+				state.Holes.Dequeue();
+
+			if (kind == HoleKind.Freeze)
+			{
+				state.Freezes++;
+				state.FreezeMs += length;
+			}
+			else
+			{
+				state.Dropouts++;
+				state.DropoutMs += length;
+				state.LongestDropout = Math.Max(state.LongestDropout, length);
+			}
+
+			// The lateness samples taken across the hole do not describe a steady state: a burst makes the client look
+			// late when its game never stopped, and a stopped client's samples straddle the change of buffer below
+			state.SlackSamples.Clear();
+
+			// A download-side hole stopped the client's game for its whole length (the buffer it had was used up first,
+			// so the gap we saw is exactly what was missing). Turn the time it lost into buffer instead of catching it
+			// up: its delay grows by that much, and the next hole of that length does not stop it.
+			if (kind == HoleKind.Connection && state.BufferMode == BufferMode.Auto && maxPlayerBuffer > 0 && !state.ExemptFromPacing)
+			{
+				var target = (int)Math.Min(maxPlayerBuffer, state.TargetSlack + stopped);
+				if (target > state.TargetSlack)
+				{
+					state.TargetSlack = target;
+					if (!state.BufferNoticeSent && target >= BufferNoticeThreshold)
+					{
+						state.BufferNoticeSent = true;
+						notices.Add((index, $"Your connection dropped out for {length / 1000f:F1}s. The server now buffers {target / 1000f:F1}s of the game for you so that it keeps running through dropouts; your own commands take that much longer to happen. Type !buffer off to turn this off."));
+					}
+
+					// Log the growth in steps, not every hole
+					if (target >= state.BufferPeak + BufferLogStep || (target >= BufferNoticeThreshold && state.BufferPeak < BufferNoticeThreshold))
+						log($"{describeClient(index)}'s connection dropped out for {length / 1000f:F1}s; buffering {target / 1000f:F1}s for them from now on.");
+
+					state.BufferPeak = Math.Max(state.BufferPeak, target);
+				}
+			}
+
+			state.OpenHoleStart = -1;
+		}
+
+		/// <summary>Round-trip times from the connection's ping history (ms), on receiving a ping reply.</summary>
+		public void ReceivePing(int client, int[] pingHistory, long now = 0)
 		{
 			if (!clients.TryGetValue(client, out var state) || pingHistory.Length == 0)
 				return;
@@ -281,6 +509,54 @@ namespace OpenRA.Server
 			var sorted = pingHistory.OrderBy(p => p).ToArray();
 			state.Rtt = sorted[sorted.Length / 2];
 			state.HasRtt = true;
+
+			state.PongTimes.Enqueue(now);
+			while (state.PongTimes.Count > 60)
+				state.PongTimes.Dequeue();
+		}
+
+		/// <summary>Private messages for players (about their buffer), to be sent by the server.</summary>
+		public List<(int Client, string Message)> TakeNotices()
+		{
+			if (notices.Count == 0)
+				return null;
+
+			var result = new List<(int, string)>(notices);
+			notices.Clear();
+			return result;
+		}
+
+		/// <summary>Players the game has stopped waiting for since the last call (for the announcer).</summary>
+		public List<int> TakeContinuedWithout()
+		{
+			if (continuedWithout.Count == 0)
+				return null;
+
+			var result = new List<int>(continuedWithout);
+			continuedWithout.Clear();
+			return result;
+		}
+
+		/// <summary>The player's buffer setting, for the !buffer command.</summary>
+		public (BufferMode Mode, int Ms)? GetBuffer(int client) =>
+			clients.TryGetValue(client, out var state) ? (state.BufferMode, state.TargetSlack) : null;
+
+		/// <summary>Sets a player's buffer by hand (<paramref name="ms"/> is used for <see cref="BufferMode.Fixed"/>).</summary>
+		public void SetBuffer(int client, BufferMode mode, int ms = 0)
+		{
+			if (!clients.TryGetValue(client, out var state))
+				return;
+
+			state.BufferMode = mode;
+			state.TargetSlack = mode switch
+			{
+				BufferMode.Off => BaseSlack,
+				BufferMode.Fixed => Math.Max(BaseSlack, ms),
+				_ => state.TargetSlack,
+			};
+			state.BufferPeak = Math.Max(state.BufferPeak, state.TargetSlack);
+			state.SlackSamples.Clear();
+			log($"{describeClient(client)} set their buffer to {(mode == BufferMode.Auto ? "auto" : $"{state.TargetSlack / 1000f:F1}s")}.");
 		}
 
 		/// <summary>A player has been defeated: keep relaying their orders, but stop waiting for them.</summary>
@@ -305,6 +581,9 @@ namespace OpenRA.Server
 				return;
 
 			pace = 1f;
+			probeRate = 0;
+			holdMs = 0;
+			holdUntil = 0;
 			foreach (var state in clients.Values)
 			{
 				state.FallingBehindIntervals = 0;
@@ -325,8 +604,15 @@ namespace OpenRA.Server
 				if (state.PeakSpeed > 0)
 					computer += (computer.Length > 0 ? ", and" : " Their computer managed") + $" at least {state.PeakSpeed * 100:F0}% at best";
 
+				var connection = state.Dropouts > 0
+					? $" Their connection dropped out {state.Dropouts} time(s), {state.DropoutMs / 1000f:F1}s in total, longest {state.LongestDropout / 1000f:F1}s"
+						+ (state.BufferPeak > BaseSlack ? $"; buffered up to {state.BufferPeak / 1000f:F1}s for them" : "") + "."
+					: "";
+				if (state.Freezes > 0)
+					connection += $" Their game froze {state.Freezes} time(s), {state.FreezeMs / 1000f:F1}s in total.";
+
 				log($"Summary for {describeClient(client)}: worst {state.MaxBehind / 1000f:F1}s behind, " +
-					$"average {avg / 1000f:F2}s; caused {state.SlowdownsCaused} slowdown(s)." + (computer.Length > 0 ? computer + "." : ""));
+					$"average {avg / 1000f:F2}s; caused {state.SlowdownsCaused} slowdown(s)." + (computer.Length > 0 ? computer + "." : "") + connection);
 			}
 
 			if (client == slowestClient)
@@ -354,7 +640,7 @@ namespace OpenRA.Server
 		int WindowFrames(ClientState state)
 		{
 			var nominalPeriod = netFrameInterval * timestep;
-			return (int)Math.Ceiling((double)(state.Rtt + TargetSlack + windowSlack) / nominalPeriod) + 1;
+			return (int)Math.Ceiling((double)(state.Rtt + state.TargetSlack + windowSlack) / nominalPeriod) + 1;
 		}
 
 		/// <summary>
@@ -377,6 +663,7 @@ namespace OpenRA.Server
 					return false;
 
 				started = true;
+				startedAt = now;
 				nextCloseTime = now;
 				nextControlUpdate = now + Interval;
 			}
@@ -384,13 +671,29 @@ namespace OpenRA.Server
 			if (now < nextCloseTime)
 				return false;
 
-			// Last resort: don't run further ahead of a player who has stopped responding than they could
-			// possibly be buffering. A player who is still sending frames, however slowly, never holds the game.
-			var waitingFor = clients.Where(c => !c.Value.ExemptFromPacing
+			// Last resort: don't run further ahead of a player who was keeping up and has stopped responding than
+			// they could possibly be buffering, for up to the host's limit; then continue without them (they catch
+			// up at turbo speed if they come back). A player who is still sending frames, however slowly, or who was
+			// already behind when they stopped, never holds the game.
+			var waitingFor = maxWaitForStalledPlayer <= 0 ? new List<int>() : clients.Where(c => !c.Value.ExemptFromPacing
+				&& !c.Value.GaveUpWaiting && c.Value.WasWithinBudget
 				&& nextFrame - c.Value.LastReportedFrame > WindowFrames(c.Value)
 				&& now - c.Value.LastProgressTime > StalledThreshold).Select(c => c.Key).ToList();
 			var wasBlocked = blocked;
 			blocked = waitingFor.Count > 0;
+			if (blocked && wasBlocked && now - blockedSince >= maxWaitForStalledPlayer)
+			{
+				foreach (var index in waitingFor)
+				{
+					clients[index].GaveUpWaiting = true;
+					continuedWithout.Add(index);
+				}
+
+				log($"Everyone waited {(now - blockedSince) / 1000f:F1}s for {blockedBy}, who has stopped responding; the game continues without them.");
+				blocked = false;
+				wasBlocked = false;
+			}
+
 			if (blocked)
 			{
 				if (!wasBlocked)
@@ -399,7 +702,7 @@ namespace OpenRA.Server
 					blockedBy = string.Join(", ", waitingFor.Select(describeClient));
 
 					// Don't log the start of every wait in a rapid sequence; they are reported in aggregate
-					if (now - lastResumeTime > 1000)
+					if (lastResumeTime < 0 || now - lastResumeTime > 1000)
 						log($"Everyone is waiting for {blockedBy}, who has stopped responding.");
 				}
 
@@ -461,6 +764,17 @@ namespace OpenRA.Server
 
 			nextControlUpdate = now + Interval;
 
+			// Classify holes whose burst window has passed without another packet, and let quiet buffers shrink
+			foreach (var (index, state) in clients)
+			{
+				if (state.OpenHoleStart >= 0 && now > state.OpenHoleEnd + BurstWindowMs)
+					CloseHole(index, state, now);
+
+				// Shrink towards the base by the half-life: the controller then runs the client a little fast
+				if (state.BufferMode == BufferMode.Auto && state.TargetSlack > BaseSlack)
+					state.TargetSlack = BaseSlack + (int)((state.TargetSlack - BaseSlack) * Math.Pow(0.5, (double)Interval / BufferHalfLife));
+			}
+
 			// How far behind its target position each client is (ms). Positive: frames are waiting in its
 			// buffer for longer than needed, so it should run faster. Negative: it is close to running dry.
 			var behind = new Dictionary<int, long>();
@@ -469,7 +783,7 @@ namespace OpenRA.Server
 				if (state.SlackSamples.Count == 0)
 					continue;
 
-				var b = Median(state.SlackSamples) - TargetSlack;
+				var b = Median(state.SlackSamples) - state.TargetSlack;
 				behind[index] = b;
 				state.SlackSamples.Clear();
 
@@ -482,6 +796,14 @@ namespace OpenRA.Server
 				}
 
 				state.BehindSamples++;
+
+				// A client the game stopped waiting for is waited for again once it has caught up
+				state.WasWithinBudget = b <= lagBudget;
+				if (state.GaveUpWaiting && state.WasWithinBudget)
+				{
+					state.GaveUpWaiting = false;
+					log($"{describeClient(index)} has caught up again.");
+				}
 			}
 
 			// A client that is well behind and keeps falling further behind even though it was told to run
@@ -545,9 +867,32 @@ namespace OpenRA.Server
 					continue;
 
 				// Match the game's pace to what this client has managed while running as fast as it can,
-				// with a little headroom so it can work off its backlog
+				// with a little headroom so it can work off its backlog. Time the client spent in holes (its
+				// connection dropped out, or its game froze) is taken out first: a stall is not a rate, and
+				// slowing everyone to the average of "nothing" and "flat out" helps nobody. Only the rate the
+				// client sustains between holes can slow the game.
 				var (startTime, startFrame) = state.Progress.Peek();
-				var framesPerMs = (double)(state.LastReportedFrame - startFrame) / Math.Max(1, now - startTime);
+				var elapsed = Math.Max(1, now - startTime);
+				var holeMs = state.Holes.Where(h => h.End > startTime).Sum(h => Math.Min(h.Length, h.End - startTime));
+				if (state.OpenHoleStart >= 0)
+					holeMs += Math.Min(state.OpenHoleEnd - state.OpenHoleStart, state.OpenHoleEnd - startTime);
+
+				var framesPerMs = (double)(state.LastReportedFrame - startFrame) / Math.Max(1, elapsed - holeMs);
+				if (holeMs > 0 && framesPerMs * nominalPeriod * PaceHeadroom >= 1 / pace)
+				{
+					// Between the holes this client keeps up with the game as it is: the deficit is theirs to catch up
+					state.FallingBehindIntervals = 0;
+					state.BehindIntervals = 0;
+					if (state.LastHoleReport < 0 || now - state.LastHoleReport > HoleReportInterval)
+					{
+						state.LastHoleReport = now;
+						log($"{describeClient(index)} is {b / 1000f:F1}s behind because of {(state.Holes.Any(h => h.Kind != HoleKind.Freeze) ? "connection dropouts" : "freezes")} " +
+							$"({holeMs / 1000f:F1}s in the last {elapsed / 1000f:F0}s), not their computer; the game is not slowed down for them.");
+					}
+
+					continue;
+				}
+
 				if (framesPerMs > 0)
 				{
 					var needed = (float)(1 / (nominalPeriod * PaceHeadroom * framesPerMs));
@@ -567,8 +912,24 @@ namespace OpenRA.Server
 					var managed = framesPerMs * nominalPeriod;
 					if (needed > pace + 0.005f)
 					{
+						// A slowdown while the game was being sped back up is a failed probe: this computer's ceiling is
+						// where it was, so wait longer before trying again. The first slowdown for a player is not held.
+						var hold = "";
+						if (holdFor != index)
+						{
+							holdFor = index;
+							holdMs = 0;
+						}
+						else if (probeRate > 0)
+						{
+							holdMs = Math.Min(MaxHold, Math.Max(MinHold, holdMs * 2));
+							hold = $" The game will not be sped up again for {holdMs / 1000}s.";
+						}
+
+						holdUntil = now + holdMs;
+						probeRate = 0;
 						log($"Slowing the game to {100 / needed:F0}% of normal speed so that {describeClient(index)} can keep up " +
-							$"(their computer is managing {managed * 100:F0}% and is {b / 1000f:F1}s behind).");
+							$"(their computer is managing {managed * 100:F0}% and is {b / 1000f:F1}s behind).{hold}");
 						state.SlowdownsCaused++;
 					}
 
@@ -589,21 +950,31 @@ namespace OpenRA.Server
 			}
 
 			// Probe back towards full speed once every client is keeping up (a client that sent nothing
-			// this interval may be stuck, so wait until it reports again)
+			// this interval may be stuck, so wait until it reports again), unless a recent probe failed.
 			// Only start speeding back up once everyone is comfortably inside the lag budget, not right at its
-			// edge, so that the game does not alternate between slowing down and speeding up
+			// edge, so that the game does not alternate between slowing down and speeding up.
+			// The probe starts gently and accelerates while it succeeds: a computer at a hard ceiling is found
+			// out within a few points of it, while a computer whose load has passed gets the game back to full
+			// speed in well under a minute.
 			var playerBehind = behind.Where(b => !clients[b.Key].ExemptFromPacing).Select(b => b.Value).ToList();
 			var recoveryThreshold = Math.Max(nominalPeriod, lagBudget / 2);
-			if (!cannotKeepUp && pace > 1f && playerBehind.Count == clients.Values.Count(c => !c.ExemptFromPacing))
+			if (!cannotKeepUp && pace > 1f && now >= holdUntil && playerBehind.Count == clients.Values.Count(c => !c.ExemptFromPacing)
+				&& playerBehind.All(b => b <= recoveryThreshold))
 			{
-				if (playerBehind.All(b => b <= nominalPeriod))
-					pace = Math.Max(1f, pace - PaceFastDownStep);
-				else if (playerBehind.All(b => b <= recoveryThreshold))
-					pace = Math.Max(1f, pace - PaceDownStep);
+				if (probeRate <= 0)
+				{
+					probeRate = ProbeRate;
+					probeSince = now;
+				}
+				else
+					probeRate = Math.Min(MaxProbeRate, ProbeRate * (float)Math.Pow(2, (now - probeSince) / ProbeDoublingTime));
 
+				pace = Math.Max(1f, 1 / (1 / pace + probeRate / 100f));
 				if (pace == 1f && oldPace > 1f)
 				{
 					slowestClient = -1;
+					probeRate = 0;
+					holdMs = 0;
 					log("The game is back to full speed.");
 				}
 			}
@@ -631,23 +1002,30 @@ namespace OpenRA.Server
 			{
 				var baseTickMs = timestep * pace;
 				var tickMs = (int)Math.Round(baseTickMs);
+				var fastestTickMs = minTickMs;
 				if (behind.TryGetValue(index, out var b))
 				{
 					if (Math.Abs(b) >= SlackDeadband)
 						tickMs = (int)Math.Round(baseTickMs - Gain * b / ticksPerInterval);
 
+					// The further behind, the faster it may be asked to run (see CatchUpPerSecondBehind)
+					if (b > 0)
+						fastestTickMs = CatchUpTickMs(1 + CatchUpPerSecondBehind * b / 1000f);
+
 					state.LastBehind = b;
 				}
-				else if (state.ExemptFromPacing && nextFrame - state.LastReportedFrame > WindowFrames(state))
+				else if (nextFrame - state.LastReportedFrame > WindowFrames(state))
 				{
-					// A spectator or defeated player so far behind that its frames are no longer tracked (or that
-					// sent nothing this interval) gets no lateness samples. Keep telling it to run flat out so that
-					// it can catch up if its computer recovers, instead of being stuck behind for the rest of the game.
-					tickMs = minTickMs;
+					// A client so far behind that its frames are no longer tracked (or that sent nothing this
+					// interval) gets no lateness samples: a spectator or defeated player who fell behind, a player
+					// left behind by the floor, or one the game stopped waiting for. Tell it to run flat out so
+					// that it catches up if its computer or connection recovers, instead of staying behind for
+					// the rest of the game.
+					tickMs = fastestTickMs = CatchUpTickMs(maxCatchUpSpeed);
 				}
 
 				var roundedBaseTickMs = (int)Math.Round(baseTickMs);
-				tickMs = tickMs.Clamp(minTickMs, Math.Max(maxTickMs, (int)Math.Round(baseTickMs * 1.25f)));
+				tickMs = tickMs.Clamp(fastestTickMs, Math.Max(maxTickMs, (int)Math.Round(baseTickMs * 1.25f)));
 				state.WasToldToSpeedUp = tickMs < roundedBaseTickMs;
 				state.RequestedSpeed = (float)timestep / tickMs;
 
@@ -659,10 +1037,15 @@ namespace OpenRA.Server
 			return result;
 		}
 
+		// The shortest tick (ms) for a requested speed-up, never faster than the host's cap nor slower than the
+		// ordinary correction limit
+		int CatchUpTickMs(float speed) =>
+			Math.Max(1, (int)Math.Round(timestep / Math.Min(maxCatchUpSpeed, Math.Max(1 / MinTickScale, speed))));
+
 		static string Role(ClientState state) =>
 			state.IsSpectator ? " (spectator)" : state.IsDefeated ? " (defeated)" : state.IsTooSlow ? " (too slow)" : "";
 
-		static long Median(List<long> values)
+		static long Median(IEnumerable<long> values)
 		{
 			var a = values.ToArray();
 			Array.Sort(a);

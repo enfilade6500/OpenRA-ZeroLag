@@ -105,10 +105,12 @@ namespace OpenRA
 
 		[Desc("Multiplayer games: the game is never slowed down below this percentage of normal speed to accommodate a " +
 			"player whose computer can't keep up; a player who would need it slower is left to fall behind on their own " +
-			"instead, and catches back up if their computer recovers. 50 (default) protects the other players from a game " +
-			"at a crawl. 0 means no floor: as in the original game, the game follows the slowest player's computer however " +
-			"slow it is, smoothly rather than stuttering, and it is up to the players to vote-kick if they would rather not wait.")]
-		public int MinGameSpeed = 50;
+			"instead, and catches back up if their computer recovers. 30 (default) only stops a game from becoming a crawl; " +
+			"above that it is up to the players, who can see the speed with !speed and, if the host enables VoteKickSlowest, " +
+			"vote with !kickslow. Maps played with very large armies routinely run at 50-70% on the slowest computer, and " +
+			"their players accept that. 0 means no floor: as in the original game, the game follows the slowest player's " +
+			"computer however slow it is, smoothly rather than stuttering.")]
+		public int MinGameSpeed = 30;
 
 		[Desc("Multiplayer games: how far behind (in milliseconds) a player whose computer can't keep up may fall " +
 			"before the game is slowed down for everyone. While behind, only that player's orders take longer to take effect, " +

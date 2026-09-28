@@ -144,9 +144,9 @@ static class Tests
 	{
 		const int Timestep = 40;
 		var logs = new List<string>();
-		var s = new FrameScheduler(Timestep, 3, 1, new[] { 0, 1 }, 0, null, logs.Add, null, 75);
-		s.ReceivePing(0, new[] { 20 }); s.ReceivePing(1, new[] { 20 });
-		s.ReceivePacket(0, 1, Order, 0); s.ReceivePacket(1, 1, Order, 0);
+		var s = new FrameScheduler(Timestep, 3, 1, new[] { 0, 1, 2 }, 0, null, logs.Add, null, 75);
+		s.ReceivePing(0, new[] { 20 }); s.ReceivePing(1, new[] { 20 }); s.ReceivePing(2, new[] { 20 });
+		s.ReceivePacket(0, 1, Order, 0); s.ReceivePacket(1, 1, Order, 0); s.ReceivePacket(2, 1, Order, 0);
 		var lastFrame = 0; var slowFrame = 1; var scale0 = 1f;
 		var closed = new Queue<(int Frame, long At)>();
 		for (long t = 0; t <= 60000; t += 40)
@@ -158,7 +158,11 @@ static class Tests
 			}
 
 			while (closed.Count > 0 && t >= closed.Peek().At + 170)
-				s.ReceivePacket(0, closed.Dequeue().Frame, Order, t);
+			{
+				var f = closed.Dequeue().Frame;
+				s.ReceivePacket(0, f, Order, t);
+				s.ReceivePacket(2, f, Order, t);
+			}
 
 			if (t % 240 == 0 && slowFrame < lastFrame)
 				s.ReceivePacket(1, ++slowFrame, Order, t);
@@ -553,7 +557,7 @@ static class Tests
 		// With a 50% floor, P1 at 35% is left behind and the others play at full speed; when P1's computer
 		// recovers it catches up at turbo speed and is back in the game.
 		var othersSpeedWhileBehind = new List<int>();
-		var (logs, s, clients) = RunWithCapacities(new[] { 2.0, 0.35 }, 90000, 50, (t, cs, sched) =>
+		var (logs, s, clients) = RunWithCapacities(new[] { 2.0, 0.35, 2.0 }, 90000, 50, (t, cs, sched) =>
 		{
 			if (t == 40000)
 				cs[1].Capacity = 3.0;
@@ -566,6 +570,17 @@ static class Tests
 		Check(clients[1].MinScale < 0.3f, $"P1 is asked for turbo speed (scale {clients[1].MinScale})");
 		Check(clients[0].NextFrame - clients[1].NextFrame < 10, $"P1 caught up once its computer recovered ({clients[0].NextFrame - clients[1].NextFrame} frames apart)");
 		Check(logs.Any(l => l.Contains("P1 has caught up")), "the return is logged");
+	}
+
+	static void TwoPlayersFollowTheSlowerComputer()
+	{
+		// In a two-player game there is nobody to protect by leaving the slower player behind, so the floor does
+		// not apply: the game follows P1's 35% computer.
+		var minSpeed = 100;
+		var (logs, s, clients) = RunWithCapacities(new[] { 2.0, 0.35 }, 60000, 50, (t, cs, sched) => minSpeed = Math.Min(minSpeed, sched.SpeedPercent));
+		Check(!logs.Any(l => l.Contains("too slow")), "nobody is left behind in a two-player game");
+		Check(minSpeed <= 40, $"the game follows the slower computer ({minSpeed}%)");
+		Check(clients[0].NextFrame - clients[1].NextFrame < 40, $"the two players stay together ({clients[0].NextFrame - clients[1].NextFrame} frames apart)");
 	}
 
 	static void AnnouncerIsNotChatty()
@@ -694,6 +709,7 @@ static class Tests
 		SawtoothIsDamped();
 		RecoveryAcceleratesWhenTheLoadPasses();
 		FloorLeavesBehindAndTurboBringsBack();
+		TwoPlayersFollowTheSlowerComputer();
 		AnnouncerIsNotChatty();
 		AnnouncerSkipsPartialRecoveries();
 		TickScalesAreValid();

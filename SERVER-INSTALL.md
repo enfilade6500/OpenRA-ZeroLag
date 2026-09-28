@@ -60,7 +60,7 @@ environment file):
 Server.VoteKickSlowest=True         # players can type !kickslow (recommended)
 Server.NameSlowestPlayer=True       # chat messages name the slow player
 Server.AnnounceGameSpeed=False      # no chat messages about game speed (log only; players can also !quiet)
-Server.MinGameSpeed=0               # no floor: follow the slowest PC however slow (default 50: a slower PC is left behind)
+Server.MinGameSpeed=0               # no floor: follow the slowest PC however slow (default 30: a PC needing less is left behind)
 Server.MaxPlayerLag=0               # slow everyone as soon as a PC falls behind (default: it may lag alone for 3 s first)
 Server.MaxPlayerBuffer=0            # no adaptive buffering for lossy connections (default 1500 ms)
 Server.MaxCatchUpSpeed=200          # ask a player far behind for at most 2x (default 400)
@@ -69,7 +69,7 @@ Server.Netcode=classic              # original behaviour, without swapping the f
 Server.ZeroLagNotice=True           # add a "this is a ZeroLag server, type !speed" line when players join
 ```
 
-The README explains each one. Defaults are: announcements on, nobody named, no vote, a 50%
+The README explains each one. Defaults are: announcements on, nobody named, no vote, a 30%
 floor, a 3 s lag budget, buffering up to 1.5 s, catch-up up to 4x, a 3 s pause at most, join
 notice off.
 

@@ -153,6 +153,11 @@ namespace OpenRA.Server
 		// small, corrected lag every client picks up while the frame period shrinks.
 		const int ProbeFailureLateness = 3;
 
+		// The floor (Server.MinGameSpeed) leaves a player behind to protect the others; with fewer players than this
+		// there is no majority to protect, and leaving one behind ends the game for everyone. A two-player game
+		// follows the slower computer however slow it is.
+		const int MinPlayersForFloor = 3;
+
 		// A client counts as unable to keep up after falling further behind for this many intervals in a
 		// row despite being told to run faster. A one-off hitch makes it fall behind once and then recover.
 		const int FallingBehindIntervalsBeforePaceChange = 3;
@@ -964,7 +969,7 @@ namespace OpenRA.Server
 				if (framesPerMs > 0)
 				{
 					var needed = (float)(1 / (nominalPeriod * PaceHeadroom * framesPerMs));
-					if (needed > maxPace)
+					if (needed > maxPace && clients.Values.Count(c => !c.ExemptFromPacing) >= MinPlayersForFloor)
 					{
 						// Slowing everyone down to the floor would not keep this player in the game anyway,
 						// so don't make the others pay for it: this player falls behind on their own instead

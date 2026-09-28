@@ -27,9 +27,9 @@ advance, so one bad connection produces game-wide freezes. On a ZeroLag server:
   Only their own commands take longer; nobody else is affected. They are told, and can turn
   it off or set it themselves with **`!buffer`**. A dropout never slows the game for anyone.
 - A player whose **computer** can't keep up (long games, many units) slows the game down
-  **smoothly** instead of the stock stop-start stutter, but never below 50% by default: a
+  **smoothly** instead of the stock stop-start stutter, but never below 30% by default: a
   computer that needs less is left behind, like a spectator, and catches back up at turbo
-  speed if its load drops. The chat says so — *"Slowing the game to 78% so that the slowest
+  speed if its load drops. Above that it is the players' call. The chat says so — *"Slowing the game to 78% so that the slowest
   computer can keep up."* — and says when it is back to full speed. The player concerned is
   told privately; the others are not told who it is unless the host enables that.
 - Type **`!speed`** in the chat to ask the current game speed, **`!quiet`** to hide the speed
@@ -64,7 +64,7 @@ server. See [SERVER-INSTALL.md](SERVER-INSTALL.md) for a step-by-step version wi
 |---|---|---|
 | `Server.Netcode` | `dynamic` | `dynamic` = ZeroLag scheduling; `classic` = the original fixed-latency relay, for A/B testing or rollback without swapping files. |
 | `Server.MaxPlayerLag` | `3000` | Milliseconds a slow-PC player may fall behind (absorbing the lag alone) before the whole game is slowed for them. 3 s means temporary dips such as big battles usually never touch the other players; `0` slows everyone as soon as anyone falls behind. |
-| `Server.MinGameSpeed` | `50` | Never slow the game below this percentage for a slow computer; a computer that needs less is left to fall behind on its own, and catches up at turbo speed if it recovers. `0` = no floor: the game follows the slowest computer however slow, as stock does. |
+| `Server.MinGameSpeed` | `30` | Never slow the game below this percentage for a slow computer; a computer that needs less is left to fall behind on its own, and catches up at turbo speed if it recovers. Above the floor it is the players' call (`!speed`, `!kickslow`): maps played with huge armies routinely run at 50–70% and their players accept that. Not applied with fewer than three players. `0` = no floor, as stock. |
 | `Server.MaxPlayerBuffer` | `1500` | Largest buffer (ms) built for a player whose connection drops out; costs only that player's own input delay. `0` disables it. |
 | `Server.MaxCatchUpSpeed` | `400` | Fastest speed (percent) a player far behind is asked to run at to catch up; players slightly behind are asked for much less. |
 | `Server.MaxWaitForStalledPlayer` | `3000` | Longest the game pauses (ms) for a player who stops responding, before continuing without them. `0` never pauses. |

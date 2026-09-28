@@ -34,7 +34,7 @@ slightly faster to catch up.
 
 **3. Slow computers.** If a player's *computer* can't keep up (long games with many
 units), the server slows the whole game **smoothly** to their pace, instead of the stock
-server's freeze-run-freeze stutter — but not below `Server.MinGameSpeed` (default 50):
+server's freeze-run-freeze stutter — but not below `Server.MinGameSpeed` (default 30):
 a player who would need the game slower than that is left to fall behind on their own,
 still relayed and never waited for, and is asked for turbo speed so that they catch back
 up if their load drops. `0` removes the floor, which is what the stock server does: the
@@ -111,7 +111,7 @@ edge.
 |---|---|---|
 | `Server.Netcode` | `dynamic` | `dynamic` = server-clock scheduler; `classic` = fixed-latency relay. |
 | `Server.MaxPlayerLag` | `3000` | ms a slow-PC player may fall behind (lagging alone) before the whole game is slowed for them. |
-| `Server.MinGameSpeed` | `50` | Never slow below this for a slow PC; a PC needing less lags alone and catches up at turbo speed if it recovers. `0` = no floor (follow the slowest PC, as stock does). `100` = never slow anyone. |
+| `Server.MinGameSpeed` | `30` | Never slow below this for a slow PC; a PC needing less lags alone and catches up at turbo speed if it recovers. `0` = no floor (follow the slowest PC, as stock does). `100` = never slow anyone. |
 | `Server.MaxPlayerBuffer` | `1500` | Largest buffer (ms) built for a player whose connection drops out. `0` disables adaptive buffering. |
 | `Server.MaxCatchUpSpeed` | `400` | Fastest speed (percent) a client far behind is asked to run at. |
 | `Server.MaxWaitForStalledPlayer` | `3000` | Longest pause (ms) for a player who stops responding, then the game continues without them. `0` never pauses. |
@@ -240,11 +240,18 @@ be a freeze. A freeze that shows a buffer to be pointless takes it away again.
    slowed for a battle back to full speed in about half a minute once the battle is over
    (45% → 100% in ~35 s), where v1.0 crept up a point at a time and took eight minutes
    from 17%.
-7. *A floor by default.* `Server.MinGameSpeed` defaults to 50. A player whose computer
-   needs the game slower than half speed is left behind (like a spectator: relayed, never
-   waited for) instead of dragging everyone to a pace at which the game ended anyway in
-   every case seen. They are asked for turbo speed the whole time, so if their load drops
-   they can rejoin the present.
+7. *A floor by default.* `Server.MinGameSpeed` defaults to 30. A player whose computer
+   needs the game slower than that is left behind (like a spectator: relayed, never waited
+   for) instead of dragging everyone to a crawl; they are asked for turbo speed the whole
+   time, so if their load drops they can rejoin the present. The floor is deliberately
+   low: on maps played with very large armies the slowest computer routinely sets a pace
+   of 50–70% during the big battles and the players accept that as part of the map (a
+   two-player game on "Grand massacre" ran at 48–82% for six minutes and finished happily;
+   the only game seen below 30% was the 17% dropout case that attribution now prevents).
+   Above the floor the decision belongs to the players: `!speed` says what is happening,
+   and `!kickslow` (if the host enables it) lets them act on it. With fewer than three
+   players the floor does not apply at all — there is no majority to protect, and leaving
+   one of two players behind ends the game for both.
 
 **Messages and log.**
 
@@ -268,7 +275,7 @@ be a freeze. A freeze that shows a buffer to be pointless takes it away again.
 | `Server.MaxPlayerBuffer` | `1500` | Largest buffer (ms) the server will build for a player whose connection drops out, at the cost of that player's own input delay. `0` disables adaptive buffering (fixed 150 ms for everyone, as in v1.0). |
 | `Server.MaxCatchUpSpeed` | `400` | Fastest speed (percent of normal) a client far behind is asked to run at while catching up. |
 | `Server.MaxWaitForStalledPlayer` | `3000` | Longest the game pauses (ms) for a player who was keeping up and has stopped responding, before continuing without them. `0` never pauses. |
-| `Server.MinGameSpeed` | `50` (was `0`) | Floor for slowing the game for a slow computer; a player needing less is left behind. |
+| `Server.MinGameSpeed` | `30` (was `0`) | Floor for slowing the game for a slow computer; a player needing less is left behind. |
 
 Everything else that changed is an internal constant derived from things the server
 already measures: the hole threshold (2.5 frame periods and 3× the client's own cadence),

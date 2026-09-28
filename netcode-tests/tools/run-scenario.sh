@@ -8,6 +8,7 @@ for i in $(seq 1 100); do python3 -c "import socket;socket.create_connection(('1
 sleep 1
 dotnet /home/claude/harness/out/NetHarness.dll --port $PORT --scenario $S --duration $D --seed $SEED --label $LABEL $EXTRA --out $RES/$LABEL-$S-$SEED.json
 RC=$?
+sleep 2   # let the server log the per-player summaries for the disconnecting clients
 kill $SPID 2>/dev/null; pkill -f "Server.ListenPort=$PORT" 2>/dev/null; wait $SPID 2>/dev/null
 cp /tmp/ora-support-$V-$PORT/Logs/dedicated-server.log $RES/serverlog-$LABEL-$S-$SEED.log 2>/dev/null
 exit $RC

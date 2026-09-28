@@ -21,10 +21,28 @@ namespace NetHarness
 		/// <summary>How long each freeze holds back all traffic on this direction.</summary>
 		public double SpikeMs = 0;
 
+		/// <summary>
+		/// Chance (percent) that a freeze doubles in length, applied repeatedly (up to 8x): a lost TCP retransmission
+		/// doubles the retransmission timeout, so real holes are mostly RTO-sized with a tail of 2x and 4x.
+		/// </summary>
+		public double SpikeDoublePct = 0;
+
+		/// <summary>Bursty loss: every BurstEverySec seconds of game time, for BurstForSec seconds, freezes happen at BurstSpikeRatePerSec instead.</summary>
+		public double BurstEverySec = 0;
+		public double BurstForSec = 0;
+		public double BurstSpikeRatePerSec = 0;
+
+		/// <summary>Complete outage: nothing passes from DeadAtSec (game time) for DeadForSec seconds.</summary>
+		public double DeadAtSec = double.NaN;
+		public double DeadForSec = 0;
+
 		public LinkSpec Clone() => (LinkSpec)MemberwiseClone();
 
 		public override string ToString() =>
-			$"{BaseMs}ms+{JitterMs}j" + (SpikeRatePerSec > 0 ? $" spikes {SpikeMs}ms@{SpikeRatePerSec}/s" : "");
+			$"{BaseMs}ms+{JitterMs}j" + (SpikeRatePerSec > 0 ? $" spikes {SpikeMs}ms@{SpikeRatePerSec}/s" : "")
+			+ (SpikeDoublePct > 0 ? $" x2@{SpikeDoublePct}%" : "")
+			+ (BurstEverySec > 0 ? $" bursts {BurstSpikeRatePerSec}/s for {BurstForSec}s every {BurstEverySec}s" : "")
+			+ (DeadForSec > 0 ? $" dead {DeadForSec}s@{DeadAtSec}s" : "");
 	}
 
 	/// <summary>
@@ -38,9 +56,14 @@ namespace NetHarness
 		readonly LinkSpec up, down;
 		readonly int seed;
 		Socket clientSide, serverSide;
+		Pipe upPipe, downPipe;
 		volatile bool disposed;
 
 		public int Port => ((IPEndPoint)listener.LocalEndpoint).Port;
+
+		/// <summary>What the link actually did: freezes injected in each direction (count, total seconds).</summary>
+		public string Injected =>
+			$"up {upPipe?.Freezes ?? 0} freezes/{(upPipe?.FrozenMs ?? 0) / 1000:F1}s, down {downPipe?.Freezes ?? 0} freezes/{(downPipe?.FrozenMs ?? 0) / 1000:F1}s";
 
 		public DelayProxy(IPEndPoint server, LinkSpec up, LinkSpec down, int seed)
 		{
@@ -61,8 +84,10 @@ namespace NetHarness
 				clientSide.NoDelay = true;
 				serverSide = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
 				serverSide.Connect(server);
-				new Pipe(clientSide, serverSide, up, seed * 2 + 1, this).Start("up");
-				new Pipe(serverSide, clientSide, down, seed * 2 + 2, this).Start("down");
+				upPipe = new Pipe(clientSide, serverSide, up, seed * 2 + 1, this);
+				downPipe = new Pipe(serverSide, clientSide, down, seed * 2 + 2, this);
+				upPipe.Start("up");
+				downPipe.Start("down");
 			}
 			catch (Exception) when (disposed) { }
 		}
@@ -87,6 +112,9 @@ namespace NetHarness
 			readonly BlockingCollection<(double Due, byte[] Data)> queue = new();
 			double lastDue;
 			double spikeStart = double.NaN, spikeEnd = double.NaN;
+			double burstSpikeStart = double.NaN, burstSpikeEnd = double.NaN;
+			public int Freezes;
+			public double FrozenMs;
 
 			public Pipe(Socket from, Socket to, LinkSpec spec, int seed, DelayProxy owner)
 			{
@@ -95,7 +123,7 @@ namespace NetHarness
 				this.spec = spec;
 				this.owner = owner;
 				rng = new Random(seed);
-				ScheduleNextSpike(Clock.Now);
+				spikeStart = ScheduleSpike(Clock.Now, spec.SpikeRatePerSec, out spikeEnd);
 			}
 
 			public void Start(string name)
@@ -104,28 +132,88 @@ namespace NetHarness
 				new Thread(Write) { IsBackground = true, Name = "proxy-write-" + name }.Start();
 			}
 
-			void ScheduleNextSpike(double after)
+			// A freeze is a lost segment: nothing gets through until TCP retransmits it after the timeout,
+			// and a lost retransmission doubles the timeout
+			double FreezeLength()
 			{
-				if (spec.SpikeRatePerSec <= 0 || spec.SpikeMs <= 0)
-					return;
+				var len = spec.SpikeMs;
+				for (var k = 0; k < 3 && spec.SpikeDoublePct > 0 && rng.NextDouble() * 100 < spec.SpikeDoublePct; k++)
+					len *= 2;
 
-				var wait = -Math.Log(1 - rng.NextDouble()) / spec.SpikeRatePerSec * 1000.0;
-				spikeStart = after + wait;
-				spikeEnd = spikeStart + spec.SpikeMs;
+				return len;
+			}
+
+			double ScheduleSpike(double after, double ratePerSec, out double end)
+			{
+				end = double.NaN;
+				if (ratePerSec <= 0 || spec.SpikeMs <= 0)
+					return double.NaN;
+
+				var wait = -Math.Log(1 - rng.NextDouble()) / ratePerSec * 1000.0;
+				var start = after + wait;
+				end = start + FreezeLength();
+				return start;
+			}
+
+			bool InBurst(double now)
+			{
+				if (spec.BurstEverySec <= 0 || double.IsNaN(Clock.GameStart))
+					return false;
+
+				var t = (now - Clock.GameStart) / 1000.0;
+				return t >= 0 && t % spec.BurstEverySec >= spec.BurstEverySec - spec.BurstForSec;
 			}
 
 			double DueTime(double now)
 			{
 				var due = now + spec.BaseMs + rng.NextDouble() * spec.JitterMs;
+				var heldUntil = double.NaN;
 
 				if (!double.IsNaN(spikeStart))
 				{
 					// Advance past freeze windows that ended before this chunk arrived
 					while (now >= spikeEnd)
-						ScheduleNextSpike(spikeEnd);
+						spikeStart = ScheduleSpike(spikeEnd, spec.SpikeRatePerSec, out spikeEnd);
 
 					if (now >= spikeStart)
-						due = Math.Max(due, spikeEnd + spec.BaseMs);
+						heldUntil = spikeEnd;
+				}
+
+				// The burst stream only runs (and is only scheduled) inside burst windows, so a burst starts with a fresh draw
+				if (InBurst(now))
+				{
+					if (double.IsNaN(burstSpikeStart) || burstSpikeStart < now - spec.BurstForSec * 1000)
+						burstSpikeStart = ScheduleSpike(now, spec.BurstSpikeRatePerSec, out burstSpikeEnd);
+
+					while (now >= burstSpikeEnd)
+						burstSpikeStart = ScheduleSpike(burstSpikeEnd, spec.BurstSpikeRatePerSec, out burstSpikeEnd);
+
+					if (now >= burstSpikeStart)
+						heldUntil = double.IsNaN(heldUntil) ? burstSpikeEnd : Math.Max(heldUntil, burstSpikeEnd);
+				}
+				else
+					burstSpikeStart = double.NaN;
+
+				// A complete outage at a fixed point in the game
+				if (spec.DeadForSec > 0 && !double.IsNaN(Clock.GameStart))
+				{
+					var t = (now - Clock.GameStart) / 1000.0;
+					if (t >= spec.DeadAtSec && t < spec.DeadAtSec + spec.DeadForSec)
+					{
+						var deadEnd = Clock.GameStart + (spec.DeadAtSec + spec.DeadForSec) * 1000.0;
+						heldUntil = double.IsNaN(heldUntil) ? deadEnd : Math.Max(heldUntil, deadEnd);
+					}
+				}
+
+				if (!double.IsNaN(heldUntil))
+				{
+					if (heldUntil + spec.BaseMs > lastDue)
+					{
+						Freezes++;
+						FrozenMs += heldUntil - now;
+					}
+
+					due = Math.Max(due, heldUntil + spec.BaseMs);
 				}
 
 				// TCP never reorders

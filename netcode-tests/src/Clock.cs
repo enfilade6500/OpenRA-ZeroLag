@@ -13,6 +13,9 @@ namespace NetHarness
 		/// <summary>Integer ms clock, equivalent to Game.RunTime in the real client.</summary>
 		public static long RunTime => Watch.ElapsedMilliseconds;
 
+		/// <summary>When the game started (Now units), for scripted events in the link and CPU models; NaN until then.</summary>
+		public static double GameStart = double.NaN;
+
 		public static void SleepUntil(double due)
 		{
 			double rem;

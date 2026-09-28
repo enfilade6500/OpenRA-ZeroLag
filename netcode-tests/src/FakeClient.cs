@@ -28,8 +28,33 @@ namespace NetHarness
 		public double HeavyForSec = 0;
 		public double HeavyTickMs = 0;
 
+		/// <summary>
+		/// Tick cost as a function of game time, "sec:ms,sec:ms,...", linearly interpolated between the points and
+		/// held after the last one (a machine that slows down as the map fills up: "0:36,20:44,140:80").
+		/// Overrides TickMs while set.
+		/// </summary>
+		public string Schedule;
+
+		(double T, double Ms)[] points;
+
+		public double CostAt(double gameSeconds)
+		{
+			if (Schedule == null)
+				return TickMs;
+
+			points ??= Schedule.Split(',').Select(p => p.Split(':')).Select(p => (double.Parse(p[0], System.Globalization.CultureInfo.InvariantCulture), double.Parse(p[1], System.Globalization.CultureInfo.InvariantCulture))).ToArray();
+			if (gameSeconds <= points[0].T)
+				return points[0].Ms;
+
+			for (var i = 1; i < points.Length; i++)
+				if (gameSeconds <= points[i].T)
+					return points[i - 1].Ms + (points[i].Ms - points[i - 1].Ms) * (gameSeconds - points[i - 1].T) / (points[i].T - points[i - 1].T);
+
+			return points[^1].Ms;
+		}
+
 		public override string ToString() =>
-			$"tick {TickMs}ms" + (HitchRatePerSec > 0 ? $" hitch {HitchMs}ms@{HitchRatePerSec}/s" : "") +
+			(Schedule != null ? $"tick {Schedule}" : $"tick {TickMs}ms") + (HitchRatePerSec > 0 ? $" hitch {HitchMs}ms@{HitchRatePerSec}/s" : "") +
 			(HeavyEverySec > 0 ? $" heavy {HeavyTickMs}ms for {HeavyForSec}s every {HeavyEverySec}s" : "");
 	}
 
@@ -296,8 +321,8 @@ namespace NetHarness
 
 		void WorldTick()
 		{
-			var cost = cpu.TickMs;
 			var now = Clock.Now;
+			var cost = cpu.CostAt(double.IsNaN(GameStartTime) ? 0 : (now - GameStartTime) / 1000);
 			if (cpu.HeavyEverySec > 0 && !double.IsNaN(GameStartTime) && (now - GameStartTime) / 1000 % cpu.HeavyEverySec >= cpu.HeavyEverySec - cpu.HeavyForSec)
 				cost = cpu.HeavyTickMs;
 

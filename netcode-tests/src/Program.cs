@@ -154,6 +154,64 @@ namespace NetHarness
 				p4.Cpu = new CpuSpec { TickMs = 44 };
 				return new() { Good("p1"), Good("p2"), Good("p3"), p4 };
 			}),
+
+			// Scenarios built from patterns measured in real games (see NETCODE.md, "v1.1")
+			["holetrain"] = ("the 'Condemner Meryph' case: p4 far away (~180ms RTT) on a link that drops out in bursts: 400ms holes (some 2-8x longer) about 1.5 times a second for 10s out of every 50s, a few in between, download side; capable PC", () =>
+			{
+				var p4 = Good("p4");
+				p4.Up = new LinkSpec { BaseMs = 90, JitterMs = 10, SpikeRatePerSec = 0.03, SpikeMs = 400, SpikeDoublePct = 25 };
+				p4.Down = new LinkSpec { BaseMs = 90, JitterMs = 10, SpikeRatePerSec = 0.05, SpikeMs = 400, SpikeDoublePct = 30, BurstEverySec = 50, BurstForSec = 10, BurstSpikeRatePerSec = 1.5 };
+				p4.Cpu = new CpuSpec { TickMs = 12 };
+				return new() { Good("p1"), Good("p2"), Good("p3"), p4 };
+			}),
+
+			["decline"] = ("the 'Ragnarok' case: p4's PC slides from ~110% to ~50% capacity over two minutes as the map fills up, then stays there (run 180s)", () =>
+			{
+				var p4 = Good("p4");
+				p4.Cpu = new CpuSpec { Schedule = "0:36,20:44,140:80" };
+				return new() { Good("p1"), Good("p2"), Good("p3"), p4 };
+			}),
+
+			["lossload"] = ("the 'BIG LOBBY' case: p4 loses a packet every ~8s all game (400ms holes, download side) and its PC drifts from 75% load to ~105% after two minutes (run 180s)", () =>
+			{
+				var p4 = Good("p4");
+				p4.Up = new LinkSpec { BaseMs = 40, JitterMs = 10, SpikeRatePerSec = 0.05, SpikeMs = 400 };
+				p4.Down = new LinkSpec { BaseMs = 40, JitterMs = 10, SpikeRatePerSec = 0.12, SpikeMs = 400, SpikeDoublePct = 15 };
+				p4.Cpu = new CpuSpec { Schedule = "0:30,60:30,120:42" };
+				return new() { Good("p1"), Good("p2"), Good("p3"), p4 };
+			}),
+
+			["outage8"] = ("the 'Hako' case: p4's connection is completely dead for 8s, 20s into the game, then fine", () =>
+			{
+				var p4 = Good("p4");
+				p4.Up = new LinkSpec { BaseMs = 40, JitterMs = 10, DeadAtSec = 20, DeadForSec = 8 };
+				p4.Down = new LinkSpec { BaseMs = 40, JitterMs = 10, DeadAtSec = 20, DeadForSec = 8 };
+				p4.Cpu = new CpuSpec { TickMs = 12 };
+				return new() { Good("p1"), Good("p2"), Good("p3"), p4 };
+			}),
+
+			["deadlink"] = ("a dead connection: p4's link dies 20s into the game and never comes back (the server drops p4 after its 60s timeout); the others must not be frozen for long (run 90s)", () =>
+			{
+				var p4 = Good("p4");
+				p4.Up = new LinkSpec { BaseMs = 20, JitterMs = 5, DeadAtSec = 20, DeadForSec = 600 };
+				p4.Down = new LinkSpec { BaseMs = 20, JitterMs = 5, DeadAtSec = 20, DeadForSec = 600 };
+				p4.ExpectKick = true;
+				return new() { Good("p1"), Good("p2"), Good("p3"), p4 };
+			}),
+
+			["plateau"] = ("a steadily slow PC: p4 manages ~66% for the whole game (60ms per 40ms tick); the game should settle there, not saw-tooth (run 180s)", () =>
+			{
+				var p4 = Good("p4");
+				p4.Cpu = new CpuSpec { TickMs = 60 };
+				return new() { Good("p1"), Good("p2"), Good("p3"), p4 };
+			}),
+
+			["floorreturn"] = ("p4's PC manages only ~40% for the first minute (below the 50% floor: left behind), then recovers fully and should catch back up (run 120s)", () =>
+			{
+				var p4 = Good("p4");
+				p4.Cpu = new CpuSpec { Schedule = "0:100,60:100,62:10" };
+				return new() { Good("p1"), Good("p2"), Good("p3"), p4 };
+			}),
 		};
 	}
 
@@ -211,6 +269,7 @@ namespace NetHarness
 			}
 
 			var start = clients.Max(c => c.GameStartTime);
+			Clock.GameStart = start;
 			var windowStart = start + warmup * 1000;
 			var windowEnd = start + (warmup + duration) * 1000;
 			var leavers = clients.Select((c, i) => (c, specs.Where(x => !x.NeverReady).ElementAt(i).LeaveAfterSec)).Where(x => !double.IsNaN(x.LeaveAfterSec)).ToList();
@@ -282,6 +341,9 @@ namespace NetHarness
 				var minAfter = remaining.Min(x => x.Metrics.FramesProcessed) - c.Metrics.FramesProcessed;
 				extraChecks.Add($"after {c.Metrics.Name} left at frame {c.Metrics.FramesProcessed}, the others kept going for {minAfter} more frames");
 			}
+
+			for (var i = 0; i < all.Count; i++)
+				all[i].Metrics.Link += " | injected: " + proxies[i].Injected;
 
 			foreach (var p in proxies)
 				p.Dispose();

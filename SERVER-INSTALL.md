@@ -82,6 +82,95 @@ mv "$L/OpenRA.Game.dll.stock" "$L/OpenRA.Game.dll"
 and restart. Or set `Server.Netcode=classic`, which keeps the file but restores the
 original scheduling.
 
+## Worked example: several instances under systemd (Linux)
+
+This is the layout the ZeroLag test servers use: one extracted AppImage per machine, one
+systemd instance per port, and one state directory per instance. Most Linux hosts have
+something like it.
+
+```
+/opt/openra/release-20250330/          the extracted AppImage
+/opt/openra/current -> release-20250330 what the service runs
+    usr/bin/openra-ra-server           the launcher
+    usr/lib/openra/OpenRA.Game.dll     <- ZeroLag goes here (one copy, shared by all instances)
+    usr/lib/openra/OpenRA.Game.dll.stock  the original
+
+/etc/systemd/system/openra-ra@.service            one template unit, instantiated per port
+/etc/systemd/system/openra-ra@.service.d/override.conf   log rotation (below)
+/etc/openra/1234.env, 1235.env, ...               name and settings per instance
+
+/var/lib/openra/1234/                  state directory of the instance on port 1234
+    Logs/dedicated-server.log          truncated at every start by the stock server
+    Logs/archive/<timestamp>/          the previous runs' logs (from the rotation below)
+    Replays/ra/release-20250330/       one server-side replay per game
+    maps/, motd.txt
+```
+
+The unit:
+
+```ini
+# /etc/systemd/system/openra-ra@.service
+[Unit]
+Description=OpenRA Red Alert dedicated server (port %i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=openra
+Group=openra
+EnvironmentFile=/etc/openra/%i.env
+StateDirectory=openra/%i
+ExecStart=/opt/openra/current/usr/bin/openra-ra-server Engine.SupportDir=/var/lib/openra/%i Server.ListenPort=%i "Server.Name=${SERVER_NAME}" $EXTRA_ARGS
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+The settings go in the instance's environment file:
+
+```sh
+# /etc/openra/1234.env
+SERVER_NAME=My server (ZeroLag)
+EXTRA_ARGS=Server.VoteKickSlowest=True Server.AdvertiseOnline=True
+```
+
+The stock server empties `dedicated-server.log` every time it starts, and with
+`Restart=always` it starts after every game. This override moves the previous run's logs
+aside first (note `%%` for `%` inside a unit file; `|| true` so a hiccup here never stops
+the server from starting):
+
+```ini
+# /etc/systemd/system/openra-ra@.service.d/override.conf
+[Service]
+ExecStartPre=
+ExecStartPre=/bin/sh -c 'L=/var/lib/openra/%i/Logs; A=$L/archive/$(date +%%F-%%H%%M%%S); ls $L/dedicated-*.log >/dev/null 2>&1 && mkdir -p "$A" && mv $L/dedicated-*.log "$A"/ || true'
+```
+
+Installing or updating ZeroLag on this layout:
+
+```sh
+mkdir zerolag && cd zerolag        # a fresh directory, so an old .sha256 can't be picked up
+wget https://github.com/enfilade6500/OpenRA-ZeroLag/releases/latest/download/OpenRA.Game.dll
+wget https://github.com/enfilade6500/OpenRA-ZeroLag/releases/latest/download/OpenRA.Game.dll.sha256
+sha256sum -c OpenRA.Game.dll.sha256
+
+L=/opt/openra/current/usr/lib/openra
+sudo cp "$L/OpenRA.Game.dll" "$L/OpenRA.Game.dll.stock"     # first time only
+sudo cp OpenRA.Game.dll "$L/OpenRA.Game.dll"
+
+# when nobody is playing; each instance picks the file up as it restarts
+sudo systemctl restart openra-ra@1234 openra-ra@1235 openra-ra@1236
+```
+
+The state directories belong to the service user, so reading them takes `sudo`. To collect
+every instance's logs and replays for a look (the replays are the more useful half):
+
+```sh
+sudo tar czf ~/openra-$(hostname)-$(date +%F).tgz -C /var/lib/openra --exclude='*/maps' .
+```
+
 ## Reading the log
 
 ```sh

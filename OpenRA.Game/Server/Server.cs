@@ -146,6 +146,7 @@ namespace OpenRA.Server
 		// Multiplayer games: the server decides which frame each client's orders are applied on (see FrameScheduler)
 		FrameScheduler frameScheduler;
 		GameSpeedAnnouncer speedAnnouncer;
+		readonly HashSet<int> quietPlayers = new();
 		SlowestPlayerVote slowestPlayerVote;
 
 		volatile ServerState internalState = ServerState.WaitingPlayers;
@@ -392,9 +393,19 @@ namespace OpenRA.Server
 									DispatchFrameToClient(con, playerIndex, frame);
 							}
 
+							var continuedWithout = frameScheduler?.TakeContinuedWithout();
+							if (continuedWithout != null && speedAnnouncer != null)
+								foreach (var client in continuedWithout)
+									speedAnnouncer.ContinuedWithout(client);
+
 							// The scheduler only recalculates once per interval; announcements follow the same rhythm
-							if (updated)
+							if (updated || continuedWithout != null)
 								AnnounceGameSpeed();
+
+							var notices = frameScheduler?.TakeNotices();
+							if (notices != null)
+								foreach (var (client, message) in notices)
+									SendPrivateMessage(client, message);
 
 							slowestPlayerVote?.Tick(Game.RunTime, frameScheduler?.SlowestPlayer?.Client);
 						}
@@ -616,7 +627,8 @@ namespace OpenRA.Server
 						// Players should know that the rules of lag have changed on this server, and what they can type
 						if (Settings.ZeroLagNotice && !string.Equals(Settings.Netcode, "classic", StringComparison.OrdinalIgnoreCase))
 						{
-							var notice = "This is a ZeroLag server: another player's lag can't freeze your game. In game, type !speed to see the game speed";
+							var notice = "This is a ZeroLag server: another player's lag can't freeze your game. In game, type !speed to see the game speed, " +
+								"!buffer to see or set how much the server buffers for your connection, !quiet to hide the speed messages";
 							notice += Settings.VoteKickSlowest && Settings.EnableVoteKick
 								? ", or !kickslow to vote to kick the player the game is being slowed down for."
 								: ".";
@@ -1052,22 +1064,38 @@ namespace OpenRA.Server
 			if (announcement == null)
 				return;
 
-			SendMessage(announcement.Value.Message);
-			if (announcement.Value.PrivateMessage != null)
+			if (announcement.Value.Message != null)
 			{
-				var conn = Conns.FirstOrDefault(c => c.Validated && c.PlayerIndex == announcement.Value.PrivateClient);
-				if (conn != null)
-					SendOrderTo(conn, "Message", announcement.Value.PrivateMessage);
+				// Players who asked for quiet (!quiet) are skipped; everyone else gets it as a normal server message
+				if (quietPlayers.Count == 0)
+					SendMessage(announcement.Value.Message);
+				else
+					foreach (var c in Conns.ToList())
+						if (c.Validated && !quietPlayers.Contains(c.PlayerIndex))
+							SendOrderTo(c, "Message", announcement.Value.Message);
 			}
+
+			if (announcement.Value.PrivateMessage != null)
+				SendPrivateMessage(announcement.Value.PrivateClient, announcement.Value.PrivateMessage);
 		}
 
-		/// <summary>Chat lines starting with '!' are requests to this server. Returns false for ordinary chat.</summary>
+		void SendPrivateMessage(int client, string message)
+		{
+			var conn = Conns.FirstOrDefault(c => c.Validated && c.PlayerIndex == client);
+			if (conn != null)
+				SendOrderTo(conn, "Message", message);
+		}
+
+		/// <summary>
+		/// Chat lines starting with '!' are requests to this server ('-' is accepted too, because players guess it).
+		/// Returns false for ordinary chat.
+		/// </summary>
 		bool InterpretChatCommand(Connection conn, string text)
 		{
-			if (string.IsNullOrEmpty(text) || text[0] != '!')
+			if (string.IsNullOrEmpty(text) || (text[0] != '!' && text[0] != '-'))
 				return false;
 
-			var command = text.Trim().ToLowerInvariant();
+			var command = "!" + text.Trim().ToLowerInvariant()[1..];
 			if (command == "!speed")
 			{
 				var slowest = frameScheduler.SlowestPlayer;
@@ -1098,8 +1126,53 @@ namespace OpenRA.Server
 				return true;
 			}
 
+			if (command == "!quiet")
+			{
+				if (quietPlayers.Add(conn.PlayerIndex))
+					SendOrderTo(conn, "Message", "Game speed messages are now hidden for you. Type !quiet again to show them; !speed always works.");
+				else
+				{
+					quietPlayers.Remove(conn.PlayerIndex);
+					SendOrderTo(conn, "Message", "Game speed messages are shown again.");
+				}
+
+				return true;
+			}
+
+			if (command == "!buffer" || command.StartsWith("!buffer ", StringComparison.Ordinal))
+			{
+				SendOrderTo(conn, "Message", BufferCommand(conn.PlayerIndex, command.Length > 8 ? command[8..].Trim() : ""));
+				return true;
+			}
+
 			// Not a command of ours: let it through as chat (players do write "!!!")
 			return false;
+		}
+
+		/// <summary>!buffer [off|auto|seconds]: shows or sets how much of the game the server buffers for this player.</summary>
+		string BufferCommand(int client, string argument)
+		{
+			var current = frameScheduler.GetBuffer(client);
+			if (current == null)
+				return "You are not in this game.";
+
+			string Describe((FrameScheduler.BufferMode Mode, int Ms) b) =>
+				b.Mode == FrameScheduler.BufferMode.Off ? "off (150 ms, the minimum)" : $"{b.Ms / 1000f:F1}s ({(b.Mode == FrameScheduler.BufferMode.Auto ? "automatic: grows when your connection drops out, shrinks when it is quiet" : "set by you")})";
+
+			if (argument.Length == 0)
+				return $"Your buffer is {Describe(current.Value)}. Type !buffer off, !buffer auto or !buffer <seconds> (e.g. !buffer 1.5) to change it. " +
+					"A bigger buffer keeps your game running through connection dropouts, at the cost of your own commands taking longer.";
+
+			if (argument == "off")
+				frameScheduler.SetBuffer(client, FrameScheduler.BufferMode.Off);
+			else if (argument == "auto")
+				frameScheduler.SetBuffer(client, FrameScheduler.BufferMode.Auto);
+			else if (float.TryParse(argument.TrimEnd('s'), NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds) && seconds >= 0 && seconds <= 5)
+				frameScheduler.SetBuffer(client, FrameScheduler.BufferMode.Fixed, (int)(seconds * 1000));
+			else
+				return "Usage: !buffer off, !buffer auto, or !buffer <seconds> between 0 and 5.";
+
+			return $"Your buffer is now {Describe(frameScheduler.GetBuffer(client).Value)}.";
 		}
 
 		void InterpretServerOrder(Connection conn, Order o)
@@ -1569,7 +1642,8 @@ namespace OpenRA.Server
 					string DescribeClient(int index) => LobbyInfo.ClientWithIndex(index)?.Name ?? $"client {index}";
 					frameScheduler = new FrameScheduler(gameSpeed.Timestep, LobbyInfo.GlobalSettings.NetFrameInterval,
 						firstFrame + OrderLatency, validConns.Select(c => c.PlayerIndex), Settings.MaxPlayerLag,
-						DescribeClient, message => Log.Write("server", message), spectators, Settings.MinGameSpeed);
+						DescribeClient, message => Log.Write("server", message), spectators, Settings.MinGameSpeed,
+						Settings.MaxPlayerBuffer, Settings.MaxCatchUpSpeed, Settings.MaxWaitForStalledPlayer);
 
 					var voteKickSlowest = Settings.VoteKickSlowest && Settings.EnableVoteKick;
 					if (voteKickSlowest)
@@ -1695,7 +1769,7 @@ namespace OpenRA.Server
 			{
 				server.ReceivePing(connection, pingHistory);
 				server.orderBuffer?.ReceiveQueueLength(connection.PlayerIndex, queueLength);
-				server.frameScheduler?.ReceivePing(connection.PlayerIndex, pingHistory);
+				server.frameScheduler?.ReceivePing(connection.PlayerIndex, pingHistory, Game.RunTime);
 			}
 		}
 

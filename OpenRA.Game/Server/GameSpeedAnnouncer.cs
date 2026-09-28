@@ -10,6 +10,7 @@
 #endregion
 
 using System;
+using System.Collections.Generic;
 
 namespace OpenRA.Server
 {
@@ -52,11 +53,13 @@ namespace OpenRA.Server
 		readonly Func<int, string> describeClient;
 
 		int lastAnnouncedSpeed = 100;
+		int fastestSinceAnnounce = 100;
 		long lastAnnounceTime;
 		bool announced;
 		long fullSpeedSince = -1;
 		int announcedTooSlow;
 		bool slowestPlayerGone;
+		readonly Queue<int> continuedWithout = new();
 
 		/// <summary>
 		/// The player the game was slowed down for has been kicked, has left or has been defeated. The return
@@ -65,6 +68,12 @@ namespace OpenRA.Server
 		public void SlowestPlayerGone()
 		{
 			slowestPlayerGone = true;
+		}
+
+		/// <summary>The game has stopped waiting for a player who stopped responding; everyone is told at once.</summary>
+		public void ContinuedWithout(int client)
+		{
+			continuedWithout.Enqueue(client);
 		}
 
 		/// <summary>Creates an announcer for one game.</summary>
@@ -106,11 +115,19 @@ namespace OpenRA.Server
 				slowestPlayerGone = false;
 				if (speedPercent >= 100 && lastAnnouncedSpeed < 100)
 				{
-					lastAnnouncedSpeed = 100;
+					lastAnnouncedSpeed = fastestSinceAnnounce = 100;
 					return Announce(now, "The game is back to full speed.");
 				}
 			}
 
+			// A player the game has stopped waiting for is news that cannot wait: everyone just sat through the pause
+			if (continuedWithout.Count > 0)
+			{
+				var client = continuedWithout.Dequeue();
+				return Announce(now, $"{describeClient(client)} has stopped responding; the game continues without them. They can catch up if their connection comes back.");
+			}
+
+			fastestSinceAnnounce = Math.Max(fastestSinceAnnounce, speedPercent);
 			if (announced && now - lastAnnounceTime < MinInterval)
 				return null;
 
@@ -130,19 +147,20 @@ namespace OpenRA.Server
 				if (lastAnnouncedSpeed >= 100 || now - fullSpeedSince < FullSpeedSettleTime)
 					return null;
 
-				lastAnnouncedSpeed = 100;
+				lastAnnouncedSpeed = fastestSinceAnnounce = 100;
 				return Announce(now, "The game is back to full speed.");
 			}
 
-			var wasSlowed = lastAnnouncedSpeed < 100;
-			if (wasSlowed && Math.Abs(speedPercent - lastAnnouncedSpeed) < MinChangePercent)
+			// Partial recoveries are not announced (the game speeds back up in small steps, and only full speed
+			// is worth a line); a further slowdown is, measured against the fastest the game has been since the
+			// last message, so that "60%, then quietly up to 90%, then 75%" is reported as the slowdown it felt like
+			if (speedPercent >= lastAnnouncedSpeed && speedPercent > fastestSinceAnnounce - MinChangePercent)
 				return null;
 
-			var slower = speedPercent < lastAnnouncedSpeed;
-			lastAnnouncedSpeed = speedPercent;
-			if (!slower)
-				return Announce(now, $"Game speed back up to {speedPercent}%.");
+			if (speedPercent < lastAnnouncedSpeed && lastAnnouncedSpeed - speedPercent < MinChangePercent)
+				return null;
 
+			lastAnnouncedSpeed = fastestSinceAnnounce = speedPercent;
 			var subject = namePlayer && slowestPlayer.HasValue ? $"{describeClient(slowestPlayer.Value)}'s computer" : "the slowest computer";
 			var message = $"Slowing the game to {speedPercent}% so that {subject} can keep up.{voteHint}";
 			if (!slowestPlayer.HasValue)

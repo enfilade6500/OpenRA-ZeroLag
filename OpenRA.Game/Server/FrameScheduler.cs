@@ -104,10 +104,13 @@ namespace OpenRA.Server
 		// up. A client that had genuinely stopped resumes one packet per net frame (30 ms even at 4x), never two at once.
 		const int BurstWindowMs = 20;
 
-		// A hole at least this long during which the client's ping replies kept coming was its game freezing (a hitch,
-		// dragging the window), not its connection: pings are answered by the client's network thread. Shorter holes
-		// contain too few pings to tell.
-		const int PongCheckMinHoleMs = 500;
+		// A client whose game froze (a hitch, a dragged window) looks the same from here as one whose download path
+		// died: nothing arrives, then it resumes at its normal cadence (the release client answers pings on its game
+		// thread, so those stop too). The one thing that tells them apart is the buffer: a download dropout shorter
+		// than the client's buffer is played through and leaves no hole at all, so a hole that the buffer should have
+		// covered can only be a freeze. Until a client has a buffer, holes are taken to be dropouts. A freeze that
+		// shows a buffer to be pointless takes it away again, and stops it growing for this long (ms).
+		const int FreezeMemory = 300000;
 
 		// Adaptive buffer: a download-side hole that stopped a client's game is turned into buffer, so that the next
 		// hole of that length does not stop it. The buffer shrinks back with this half-life (ms) when the connection
@@ -141,6 +144,11 @@ namespace OpenRA.Server
 		const int ProbeDoublingTime = 10000;
 		const int MinHold = 30000;
 		const int MaxHold = 120000;
+
+		// A probe has failed when a player has been falling further behind for FallingBehindIntervalsBeforePaceChange
+		// intervals and is at least this many frame periods behind: enough to tell a computer at its ceiling from the
+		// small, corrected lag every client picks up while the frame period shrinks.
+		const int ProbeFailureLateness = 3;
 
 		// A client counts as unable to keep up after falling further behind for this many intervals in a
 		// row despite being told to run faster. A one-off hitch makes it fall behind once and then recover.
@@ -217,10 +225,10 @@ namespace OpenRA.Server
 			public int BufferPeak = BaseSlack;
 			public bool BufferNoticeSent;
 
-			// Hole detection: packet and ping-reply arrival times, the client's usual gap between packets, and the hole being classified
+			// Hole detection: packet arrival times, the client's usual gap between packets, and the hole being classified
 			public long LastArrivalTime;
 			public readonly Queue<long> RecentGaps = new();
-			public readonly Queue<long> PongTimes = new();
+			public long LastFreezeTime = -1;
 			public long OpenHoleStart = -1;
 			public long OpenHoleEnd;
 			public int PacketsSinceHole;
@@ -260,7 +268,7 @@ namespace OpenRA.Server
 			/// <summary>The upload path stalled: the client kept simulating and its queued packets arrived in a burst.</summary>
 			Upload,
 
-			/// <summary>The client's game stopped (a hitch, a dragged window) while its connection kept answering pings.</summary>
+			/// <summary>The client's game stopped (a hitch, a dragged window): a hole its buffer would otherwise have covered.</summary>
 			Freeze
 		}
 
@@ -290,6 +298,7 @@ namespace OpenRA.Server
 		long nextControlUpdate;
 		float pace = 1f;
 		bool blocked;
+		bool gaveUp;
 		long blockedSince;
 		long lastResumeTime = -1;
 		string blockedBy;
@@ -300,6 +309,7 @@ namespace OpenRA.Server
 		double slowestClientSpeed;
 		float probeRate;
 		long probeSince;
+		float probeStartPace = 1f;
 		long holdUntil;
 		int holdMs;
 		int holdFor = -1;
@@ -404,8 +414,9 @@ namespace OpenRA.Server
 
 		// Hole detection. A packet that arrives long after the previous one ends a hole; the packets right after it
 		// tell whether the client had kept simulating meanwhile (a burst of queued packets: its upload path stalled)
-		// or not (its download path stalled, or its game froze). The hole is classified once the burst window has
-		// passed, so that the buffer and the pace logic act on what actually happened.
+		// or not (its download path stalled, or its game froze; see FreezeMemory for how those two are told apart).
+		// The hole is classified once the burst window has passed, so that the buffer and the pace logic act on what
+		// actually happened.
 		void NoteArrival(int index, ClientState state, long now)
 		{
 			var period = FramePeriod;
@@ -449,10 +460,25 @@ namespace OpenRA.Server
 			var typical = state.RecentGaps.Count > 0 ? Median(state.RecentGaps) : (long)FramePeriod;
 			var stopped = Math.Max(0, length - (state.PacketsSinceHole - 1) * typical);
 			var kind = HoleKind.Connection;
-			if (length >= PongCheckMinHoleMs && state.PongTimes.Any(t => t > state.OpenHoleStart + 150 && t < state.OpenHoleEnd - 50))
-				kind = HoleKind.Freeze;
-			else if (state.PacketsSinceHole >= 2 && stopped < HoleThresholdPeriods * FramePeriod)
+			if (state.PacketsSinceHole >= 2 && stopped < HoleThresholdPeriods * FramePeriod)
 				kind = HoleKind.Upload;
+			else if (state.PacketsSinceHole < 2 && state.TargetSlack > BaseSlack && stopped + FramePeriod < state.TargetSlack)
+			{
+				// The buffer would have covered a dropout this short without a hole: the client's game itself stopped
+				kind = HoleKind.Freeze;
+				state.LastFreezeTime = now;
+				if (state.BufferMode == BufferMode.Auto)
+				{
+					log($"{describeClient(index)}'s game froze for {stopped / 1000f:F1}s with {state.TargetSlack / 1000f:F1}s buffered: " +
+						"the earlier dropouts were freezes too, so the buffer is not helping them; back to the normal buffer.");
+					state.TargetSlack = BaseSlack;
+					state.Freezes += state.Dropouts;
+					state.FreezeMs += state.DropoutMs;
+					state.Dropouts = 0;
+					state.DropoutMs = 0;
+					state.LongestDropout = 0;
+				}
+			}
 
 			state.Holes.Enqueue((state.OpenHoleEnd, length, kind));
 			while (state.Holes.Count > 0 && state.Holes.Peek().End < now - HoleMemory)
@@ -477,7 +503,8 @@ namespace OpenRA.Server
 			// A download-side hole stopped the client's game for its whole length (the buffer it had was used up first,
 			// so the gap we saw is exactly what was missing). Turn the time it lost into buffer instead of catching it
 			// up: its delay grows by that much, and the next hole of that length does not stop it.
-			if (kind == HoleKind.Connection && state.BufferMode == BufferMode.Auto && maxPlayerBuffer > 0 && !state.ExemptFromPacing)
+			var recentlyFroze = state.LastFreezeTime >= 0 && now - state.LastFreezeTime < FreezeMemory;
+			if (kind == HoleKind.Connection && state.BufferMode == BufferMode.Auto && maxPlayerBuffer > 0 && !state.ExemptFromPacing && !recentlyFroze)
 			{
 				var target = (int)Math.Min(maxPlayerBuffer, state.TargetSlack + stopped);
 				if (target > state.TargetSlack)
@@ -510,10 +537,6 @@ namespace OpenRA.Server
 			var sorted = pingHistory.OrderBy(p => p).ToArray();
 			state.Rtt = sorted[sorted.Length / 2];
 			state.HasRtt = true;
-
-			state.PongTimes.Enqueue(now);
-			while (state.PongTimes.Count > 60)
-				state.PongTimes.Dequeue();
 		}
 
 		/// <summary>Private messages for players (about their buffer), to be sent by the server.</summary>
@@ -692,7 +715,7 @@ namespace OpenRA.Server
 
 				log($"Everyone waited {(now - blockedSince) / 1000f:F1}s for {blockedBy}, who has stopped responding; the game continues without them.");
 				blocked = false;
-				wasBlocked = false;
+				gaveUp = true;
 			}
 
 			if (blocked)
@@ -714,13 +737,20 @@ namespace OpenRA.Server
 			{
 				lastResumeTime = now;
 				var waited = now - blockedSince;
-				if (waited >= LoggedWaitThreshold)
+				if (gaveUp)
+					gaveUp = false;
+				else if (waited >= LoggedWaitThreshold)
 					log($"Game resumed after waiting {waited / 1000f:F1}s for {blockedBy}.");
 				else
 				{
 					shortWaits++;
 					shortWaitMs += waited;
 				}
+
+				// The other clients had nothing to send while the game was paused; that gap is not a hole in their connections
+				foreach (var state in clients.Values)
+					if (state.OpenHoleStart < 0)
+						state.LastArrivalTime = now;
 			}
 
 			frame = nextFrame++;
@@ -858,6 +888,32 @@ namespace OpenRA.Server
 
 			var cannotKeepUp = false;
 			var oldPace = pace;
+
+			// A probe has failed as soon as a player starts falling behind while it runs: go back to the speed the
+			// probe started from, where everyone was keeping up, without waiting for them to use up their whole lag
+			// budget (which would take the game ten points past their ceiling and them back to a three-second backlog)
+			if (probeRate > 0)
+			{
+				var failing = behind.Where(b => !clients[b.Key].ExemptFromPacing && b.Value > ProbeFailureLateness * nominalPeriod
+					&& clients[b.Key].FallingBehindIntervals >= FallingBehindIntervalsBeforePaceChange).Select(b => b.Key).ToList();
+				if (failing.Count > 0)
+				{
+					holdMs = Math.Min(MaxHold, Math.Max(MinHold, holdMs * 2));
+					holdUntil = now + holdMs;
+					holdFor = failing[0];
+					probeRate = 0;
+					var from = 100 / pace;
+					pace = Math.Max(pace, probeStartPace);
+					clients[failing[0]].SlowdownsCaused++;
+					foreach (var index in failing)
+						clients[index].FallingBehindIntervals = clients[index].BehindIntervals = 0;
+
+					log($"Speeding the game up to {from:F0}% was too much for {describeClient(failing[0])} ({behind[failing[0]] / 1000f:F1}s behind and falling further); " +
+						$"back to {100 / pace:F0}%, and no faster for {holdMs / 1000}s.");
+					cannotKeepUp = true;
+				}
+			}
+
 			foreach (var (index, b) in behind)
 			{
 				var state = clients[index];
@@ -887,7 +943,9 @@ namespace OpenRA.Server
 					if (state.LastHoleReport < 0 || now - state.LastHoleReport > HoleReportInterval)
 					{
 						state.LastHoleReport = now;
-						var cause = state.Holes.Any(h => h.Kind != HoleKind.Freeze) ? "connection dropouts" : "freezes";
+						var recent = state.Holes.Where(h => h.End > startTime).ToList();
+						var cause = recent.Where(h => h.Kind == HoleKind.Freeze).Sum(h => h.Length) > recent.Where(h => h.Kind != HoleKind.Freeze).Sum(h => h.Length)
+							? "freezes" : "connection dropouts";
 						log($"{describeClient(index)} is {b / 1000f:F1}s behind because of {cause} ({holeMs / 1000f:F1}s in the last {elapsed / 1000f:F0}s), " +
 							"not their computer; the game is not slowed down for them.");
 					}
@@ -967,6 +1025,7 @@ namespace OpenRA.Server
 				{
 					probeRate = ProbeRate;
 					probeSince = now;
+					probeStartPace = pace;
 				}
 				else
 					probeRate = Math.Min(MaxProbeRate, ProbeRate * (float)Math.Pow(2, (now - probeSince) / ProbeDoublingTime));

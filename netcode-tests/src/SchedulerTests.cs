@@ -301,11 +301,11 @@ static class Tests
 			foreach (var c in clients)
 				c.Run(s, t, Timestep, Interval);
 
-			// Ping replies every 250ms, answered by the client's network thread: they continue while its game is
-			// frozen, and stop while its connection is dead
+			// Ping replies every 250ms. The release client answers pings on its game thread, so they stop while its
+			// game is frozen as well as while its connection is dead
 			if (t % 250 == 0)
 				foreach (var c in clients)
-					if (!c.LinkDead(t))
+					if (!c.LinkDead(t) && t >= c.FrozenUntil)
 						s.ReceivePing(c.Index, new[] { 2 * Delay }, t);
 
 			foreach (var (client, scale) in s.GetTickScales(t))
@@ -414,23 +414,33 @@ static class Tests
 		Check(clients[0].Stalls < 5, $"the other player never noticed ({clients[0].Stalls} stalled ticks)");
 	}
 
-	static void UploadStallAndFreezeDoNotGrowTheBuffer()
+	static void UploadStallAndFreezeDoNotKeepABuffer()
 	{
-		// An upload stall (the client kept playing; its packets arrived in a burst) and a game freeze (its ping
-		// replies kept coming) are not what a buffer is for
-		var (logs, s, clients) = RunWithCapacities(new[] { 2.0, 2.0, 2.0 }, 30000, 0, (t, cs, sched) =>
+		// An upload stall (the client kept playing; its packets arrived in a burst) is not what a buffer is for.
+		// A game freeze cannot be told from a dropout the first time, so the buffer grows; the second freeze,
+		// shorter than that buffer, proves the buffer is not helping and takes it away again.
+		var bufferAfterFirstFreeze = 0;
+		var (logs, s, clients) = RunWithCapacities(new[] { 2.0, 2.0, 2.0 }, 40000, 0, (t, cs, sched) =>
 		{
 			if (t == 10000)
 			{
 				cs[1].UpDeadUntil = t + 1000;
 				cs[2].FrozenUntil = t + 1000;
 			}
-		});
+
+			if (t == 15000)
+				bufferAfterFirstFreeze = sched.GetBuffer(2).Value.Ms;
+			if (t == 25000)
+				cs[2].FrozenUntil = t + 600;
+		}, maxPlayerLag: 3000);
 
 		Check(s.GetBuffer(1).Value.Ms == 150, $"an upload stall leaves the buffer alone ({s.GetBuffer(1).Value.Ms}ms)");
-		Check(s.GetBuffer(2).Value.Ms == 150, $"a frozen game leaves the buffer alone ({s.GetBuffer(2).Value.Ms}ms)");
+		Check(bufferAfterFirstFreeze > 800, $"the first freeze is taken for a dropout and buffered ({bufferAfterFirstFreeze}ms)");
+		Check(s.GetBuffer(2).Value.Ms == 150, $"a second, shorter freeze shows the buffer is pointless and removes it ({s.GetBuffer(2).Value.Ms}ms)");
+		Check(logs.Any(l => l.Contains("P2's game froze") && l.Contains("back to the normal buffer")), "the correction is logged");
 		s.RemoveClient(2);
-		Check(logs.Last(l => l.StartsWith("Summary for P2")).Contains("froze 1 time"), "the freeze is reported as a freeze: " + logs.Last(l => l.StartsWith("Summary for P2")));
+		var summary = logs.Last(l => l.StartsWith("Summary for P2"));
+		Check(summary.Contains("froze 2 time") && !summary.Contains("dropped out"), "both freezes are reported as freezes: " + summary);
 	}
 
 	static void StallsDoNotSetThePace()
@@ -447,11 +457,10 @@ static class Tests
 			if (t == 60000)
 				cs[1].Capacity = 3.0; // the load that caused the freezes is gone
 		}, maxPlayerLag: 3000);
-		if (Environment.GetEnvironmentVariable("DEBUGLOGS") != null) foreach (var l in logs) Console.WriteLine("   | " + l);
 
 		Check(!logs.Any(l => l.StartsWith("Slowing the game")), "a player who keeps up between freezes never slows the game");
-		Check(logs.Any(l => l.Contains("P1 is") && l.Contains("because of freezes") && l.Contains("not their computer")),
-			"the log attributes the lateness to the freezes: " + (logs.FirstOrDefault(l => l.Contains("not their computer")) ?? "(no such line)"));
+		Check(logs.Any(l => l.Contains("P1 is") && l.Contains("not their computer")),
+			"the log attributes the lateness to the holes: " + (logs.FirstOrDefault(l => l.Contains("not their computer")) ?? "(no such line)"));
 		Check(logs.Any(l => l.StartsWith("Players behind: P1") && float.Parse(l.Split(' ')[3].TrimEnd('s', '.'), System.Globalization.CultureInfo.InvariantCulture) > 3), "P1 did fall more than 3s behind: " + string.Join(" / ", logs.Where(l => l.StartsWith("Players behind")).Take(4)));
 		Check(clients[1].MinScale < 0.5f, $"P1 is asked for turbo speed (scale {clients[1].MinScale})");
 		Check(clients[0].NextFrame - clients[1].NextFrame < 5, $"P1 is caught up again at the end ({clients[0].NextFrame - clients[1].NextFrame} frames apart)");
@@ -513,7 +522,7 @@ static class Tests
 		var slowdowns = logs.Count(l => l.StartsWith("Slowing the game"));
 		Check(slowdowns <= 4, $"few slowdowns for a steadily slow computer ({slowdowns} in 150s)");
 		Check(speeds.Min() >= 50 && speeds.Max() <= 70, $"after settling the speed stays close to the computer's capacity ({speeds.Min()}-{speeds.Max()}%)");
-		Check(logs.Any(l => l.Contains("will not be sped up again for")), "a failed probe is held: " + (logs.FirstOrDefault(l => l.Contains("will not be sped up")) ?? "(no hold)"));
+		Check(logs.Any(l => l.Contains("no faster for") || l.Contains("will not be sped up again for")), "a failed probe is held: " + (logs.FirstOrDefault(l => l.Contains("no faster for") || l.Contains("will not be sped up")) ?? "(no hold)"));
 	}
 
 	static void RecoveryAcceleratesWhenTheLoadPasses()
@@ -672,7 +681,7 @@ static class Tests
 		KickedSlowestPlayerRestoresFullSpeedAtOnce();
 		CapacityIsMeasuredWhileCatchingUp();
 		DownloadHoleBecomesBuffer();
-		UploadStallAndFreezeDoNotGrowTheBuffer();
+		UploadStallAndFreezeDoNotKeepABuffer();
 		StallsDoNotSetThePace();
 		OutagesLongerThanTheBufferAreAbsorbedByTurbo();
 		WaitForAStoppedPlayerIsBounded();

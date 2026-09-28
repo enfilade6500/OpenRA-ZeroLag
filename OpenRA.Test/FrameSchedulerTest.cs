@@ -324,11 +324,11 @@ namespace OpenRA.Test
 				foreach (var c in clients)
 					c.Run(s, t, Timestep, Interval);
 
-				// Ping replies every 250ms, answered by the client's network thread: they continue while its game is
-				// frozen, and stop while its connection is dead
+				// Ping replies every 250ms. The release client answers pings on its game thread, so they stop while its
+				// game is frozen as well as while its connection is dead
 				if (t % 250 == 0)
 					foreach (var c in clients)
-						if (!c.LinkDead(t))
+						if (!c.LinkDead(t) && t >= c.FrozenUntil)
 							s.ReceivePing(c.Index, new[] { 2 * Delay }, t);
 
 				foreach (var (client, scale) in s.GetTickScales(t))
@@ -444,23 +444,33 @@ namespace OpenRA.Test
 		}
 
 		[Test]
-		public void UploadStallAndFreezeDoNotGrowTheBuffer()
+		public void UploadStallAndFreezeDoNotKeepABuffer()
 		{
-			// An upload stall (the client kept playing; its packets arrived in a burst) and a game freeze (its ping
-			// replies kept coming) are not what a buffer is for
-			var (logs, s, _) = RunWithCapacities(new[] { 2.0, 2.0, 2.0 }, 30000, 0, (t, cs, sched) =>
+			// An upload stall (the client kept playing; its packets arrived in a burst) is not what a buffer is for.
+			// A game freeze cannot be told from a dropout the first time, so the buffer grows; the second freeze,
+			// shorter than that buffer, proves the buffer is not helping and takes it away again.
+			var bufferAfterFirstFreeze = 0;
+			var (logs, s, _) = RunWithCapacities(new[] { 2.0, 2.0, 2.0 }, 40000, 0, (t, cs, sched) =>
 			{
 				if (t == 10000)
 				{
 					cs[1].UpDeadUntil = t + 1000;
 					cs[2].FrozenUntil = t + 1000;
 				}
-			});
+
+				if (t == 15000)
+					bufferAfterFirstFreeze = sched.GetBuffer(2).Value.Ms;
+				if (t == 25000)
+					cs[2].FrozenUntil = t + 600;
+			}, maxPlayerLag: 3000);
 
 			Assert.That(s.GetBuffer(1).Value.Ms, Is.EqualTo(150), "An upload stall should leave the buffer alone.");
-			Assert.That(s.GetBuffer(2).Value.Ms, Is.EqualTo(150), "A frozen game should leave the buffer alone.");
+			Assert.That(bufferAfterFirstFreeze, Is.GreaterThan(800), "The first freeze cannot be told from a dropout and should be buffered.");
+			Assert.That(s.GetBuffer(2).Value.Ms, Is.EqualTo(150), "A second, shorter freeze should show the buffer is pointless and remove it.");
+			Assert.That(logs.Any(l => l.Contains("P2's game froze") && l.Contains("back to the normal buffer")), Is.True);
 			s.RemoveClient(2);
-			Assert.That(logs.Last(l => l.StartsWith("Summary for P2", StringComparison.Ordinal)), Does.Contain("froze 1 time"));
+			var summary = logs.Last(l => l.StartsWith("Summary for P2", StringComparison.Ordinal));
+			Assert.That(summary, Does.Contain("froze 2 time").And.Not.Contain("dropped out"));
 		}
 
 		[Test]
@@ -480,8 +490,8 @@ namespace OpenRA.Test
 
 			Assert.That(logs.Any(l => l.StartsWith("Slowing the game", StringComparison.Ordinal)), Is.False,
 				"A player who keeps up between freezes must never slow the game.");
-			Assert.That(logs.Any(l => l.Contains("P1 is") && l.Contains("because of freezes") && l.Contains("not their computer")), Is.True,
-				"The log should attribute the lateness to the freezes.");
+			Assert.That(logs.Any(l => l.Contains("P1 is") && l.Contains("not their computer")), Is.True,
+				"The log should attribute the lateness to the holes.");
 			Assert.That(clients[1].MinScale, Is.LessThan(0.5f), "P1 should be asked for turbo speed.");
 			Assert.That(clients[0].NextFrame - clients[1].NextFrame, Is.LessThan(5), "P1 should be caught up again at the end.");
 			Assert.That(clients[0].Stalls, Is.LessThan(5), "The other player must not notice.");
@@ -545,7 +555,7 @@ namespace OpenRA.Test
 				"A steadily slow computer should cause few slowdowns.");
 			Assert.That(speeds.Min(), Is.GreaterThanOrEqualTo(50));
 			Assert.That(speeds.Max(), Is.LessThanOrEqualTo(70), "After settling the speed should stay close to the computer's capacity.");
-			Assert.That(logs.Any(l => l.Contains("will not be sped up again for")), Is.True, "A failed probe should be held.");
+			Assert.That(logs.Any(l => l.Contains("no faster for") || l.Contains("will not be sped up again for")), Is.True, "A failed probe should be held.");
 		}
 
 		[Test]

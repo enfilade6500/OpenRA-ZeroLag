@@ -182,12 +182,15 @@ client's arrival pattern to one frame period (`netcode-tests/tools/arrival.py`).
 ### Changes
 
 **Connection side.** A client's shortfall is attributed before anything acts on it:
-gaps in its packet arrivals of more than 2.5 frame periods are *holes*, everything else
-is *smooth*. Holes are further classified by what the connection was doing meanwhile:
-the client's ping replies continued (its game froze — a hitch, a window drag), or they
-stopped too and the queued packets arrived in a burst (the upload path stalled, its
-simulation didn't), or they stopped and there was no burst (the download path or the
-whole connection stalled; the client had nothing to simulate).
+gaps in its packet arrivals of more than 2.5 frame periods (and three times its own
+cadence) are *holes*, everything else is *smooth*. Holes are further classified by what
+follows them: the queued packets arrive in a burst (the upload path stalled; the
+simulation didn't), or the client simply resumes (the download path or the whole
+connection stalled, or its game froze). Those last two look identical from the server —
+the release client answers pings on its game thread, so even those stop — but the buffer
+tells them apart after the fact: a download dropout shorter than a client's buffer is
+played through and leaves no hole, so a hole that the buffer should have covered can only
+be a freeze. A freeze that shows a buffer to be pointless takes it away again.
 
 1. *Adaptive per-player buffer.* Each client has its own target buffer instead of the
    fixed 150 ms. When a download-side hole stops a client, the time it lost is converted
@@ -224,11 +227,13 @@ whole connection stalled; the client had nothing to simulate).
 
 5. *Probe and hold.* Speeding back up is a probe: once everyone is keeping up the speed
    is raised by half a point per second, doubling every ten seconds while it succeeds (up
-   to four points per second). A slowdown while probing is a failed probe: the pace goes
-   back to what was measured and the next probe waits 30 s, doubling per failure up to
-   two minutes. The first slowdown for a player is never held, since it may be a passing
-   load. A computer at a hard ceiling is therefore found out within a few points of it
-   and then tested once in a while, instead of every twenty seconds.
+   to four points per second). As soon as a player starts falling behind while the probe
+   runs, it has failed: the speed goes straight back to where the probe started, without
+   waiting for that player to use up their lag budget, and the next probe waits 30 s,
+   doubling per failure up to two minutes. The first slowdown for a player is never held,
+   since it may be a passing load. A computer at a hard ceiling is therefore found out
+   within a few points of it and then tested once in a while, instead of being pushed ten
+   points past it every twenty seconds.
 6. *Fast recovery when the load passes.* The same accelerating probe gets a game that was
    slowed for a battle back to full speed in about half a minute once the battle is over
    (45% → 100% in ~35 s), where v1.0 crept up a point at a time and took eight minutes

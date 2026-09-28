@@ -34,17 +34,17 @@ slightly faster to catch up.
 
 **3. Slow computers.** If a player's *computer* can't keep up (long games with many
 units), the server slows the whole game **smoothly** to their pace, instead of the stock
-server's freeze-run-freeze stutter. By default there is no floor, exactly like the stock
-server: the game follows the slowest computer however slow it is, and the players decide
-via vote-kick whether to wait — the log names who is slowing the game and by how much. A
-host can set `Server.MinGameSpeed` (e.g. 75) to protect the majority instead: a player
-who would need the game slower than that is left to fall behind on their own (which, for
-that player, is much like being kicked, so it is off by default). `Server.MaxPlayerLag`
-(ms) lets a slow player absorb that much lag alone before any shared slowdown starts;
-the default of 3 s covers temporary load such as big battles, at the cost of that player
-feeling their own delay while they are behind. A player who is still sending frames,
-however slowly, never pauses the game; only a player who has stopped responding does
-(which keeps the connection-problems / vote-kick flow).
+server's freeze-run-freeze stutter — but not below `Server.MinGameSpeed` (default 50):
+a player who would need the game slower than that is left to fall behind on their own,
+still relayed and never waited for, and is asked for turbo speed so that they catch back
+up if their load drops. `0` removes the floor, which is what the stock server does: the
+game follows the slowest computer however slow it is. `Server.MaxPlayerLag` (ms) lets a
+slow player absorb that much lag alone before any shared slowdown starts; the default of
+3 s covers temporary load such as big battles, at the cost of that player feeling their
+own delay while they are behind. Only a computer's *smooth* shortfall can slow the game;
+dropouts and freezes are handled per player (see v1.1 below). A player who is still
+sending frames, however slowly, never pauses the game; a player who has stopped
+responding does, for at most `Server.MaxWaitForStalledPlayer`.
 
 **4. Spectators and defeated players never slow the game.** A spectator (no lobby slot),
 or a player once they have been defeated, is kept in lockstep and relayed, but the game
@@ -111,8 +111,11 @@ edge.
 |---|---|---|
 | `Server.Netcode` | `dynamic` | `dynamic` = server-clock scheduler; `classic` = fixed-latency relay. |
 | `Server.MaxPlayerLag` | `3000` | ms a slow-PC player may fall behind (lagging alone) before the whole game is slowed for them. |
-| `Server.MinGameSpeed` | `0` | `0` = no floor (follow the slowest PC, as stock does). `75` = never slow below 75%; a PC needing less lags alone. `100` = never slow anyone. |
-| `Server.AnnounceGameSpeed` | `True` | Tell players in the chat when the game slows down / speeds up (rate-limited). The slow player is told privately. `!speed` always works. |
+| `Server.MinGameSpeed` | `50` | Never slow below this for a slow PC; a PC needing less lags alone and catches up at turbo speed if it recovers. `0` = no floor (follow the slowest PC, as stock does). `100` = never slow anyone. |
+| `Server.MaxPlayerBuffer` | `1500` | Largest buffer (ms) built for a player whose connection drops out. `0` disables adaptive buffering. |
+| `Server.MaxCatchUpSpeed` | `400` | Fastest speed (percent) a client far behind is asked to run at. |
+| `Server.MaxWaitForStalledPlayer` | `3000` | Longest pause (ms) for a player who stops responding, then the game continues without them. `0` never pauses. |
+| `Server.AnnounceGameSpeed` | `True` | Tell players in the chat when the game slows down and when it is back to full speed (rate-limited). The slow player is told privately. `!speed` always works; `!quiet` hides the messages for that player. |
 | `Server.NameSlowestPlayer` | `False` | Name the player the game is slowed down for in the public chat messages and in `!speed` replies. |
 | `Server.VoteKickSlowest` | `False` | Players can type `!kickslow` to vote to kick whoever the game is currently slowed down for. Needs `EnableVoteKick` (stock, default on). |
 
@@ -132,10 +135,12 @@ crash where starting a game with no valid clients terminated the server process.
 - When the player the game is slowed down for is kicked, leaves or is defeated, the game
   returns to full speed at once and says so, so the effect is plain to see. (A slow
   computer that merely *recovers* is ramped back up gradually, since it may dip again.)
-- A connection dead for more than ~2s still makes everyone wait (by design; preserves
-  the "connection problems" / vote-kick flow).
-- A player on a spiky connection sees their own brief freezes. Per-connection adaptive
-  buffering (sizing each player's buffer to their own jitter) is possible future work.
+- A connection dead for more than a few seconds makes everyone wait for up to
+  `Server.MaxWaitForStalledPlayer` (3 s); the "connection problems" dialog and the 60 s
+  drop still come from the stock code, while the game goes on.
+- A player on a spiky connection feels their own delay grow, up to `Server.MaxPlayerBuffer`,
+  in exchange for a game that does not stop; holes longer than that still stop their game,
+  and they catch up at turbo speed afterwards.
 
 ## v1.1: bad connections, and the sawtooth
 
@@ -209,23 +214,25 @@ whole connection stalled; the client had nothing to simulate).
    tick), so asking for more than it can do is safe: it runs flat out.
 4. *Bounded wait for a stopped player.* The last-resort wait now applies only to a
    player who was keeping up and then went silent, and lasts at most
-   `Server.MaxWaitForStalledPlayer` (default 8000 ms); then the game continues without
+   `Server.MaxWaitForStalledPlayer` (default 3000 ms); then the game continues without
    them, and if they return they catch up at turbo speed. The stock "connection problems"
-   dialog and the 60 s drop are unchanged.
+   dialog and the 60 s drop are unchanged. (The pause only begins once the player has been
+   silent for a few seconds and is beyond their lag budget, so an 8 s outage costs the
+   others about three seconds, a 60 s one the same three seconds instead of sixty.)
 
 **Compute side.**
 
-5. *Recovery bounded by demonstrated capacity.* When the game has been slowed for a
-   computer, the pace it was slowed to is that computer's measured ceiling. Recovery
-   holds at the ceiling for a minute, then probes upward slowly (½ point per second);
-   a probe that fails (the player falls behind again) refreshes the ceiling and doubles
-   the hold. A probe that holds for 30 s raises the ceiling. This replaces the sawtooth
-   with one gentle test a minute.
-6. *Multiplicative recovery.* When the game is slower than the current pace-setter needs
-   (they have left, or their capacity has been shown to be higher), or nobody is behind,
-   the pace recovers by 15% of the excess per second: 17% reaches 50% in about 15 s and
-   90% in under a minute, and the last few points take the same few seconds they take
-   today.
+5. *Probe and hold.* Speeding back up is a probe: once everyone is keeping up the speed
+   is raised by half a point per second, doubling every ten seconds while it succeeds (up
+   to four points per second). A slowdown while probing is a failed probe: the pace goes
+   back to what was measured and the next probe waits 30 s, doubling per failure up to
+   two minutes. The first slowdown for a player is never held, since it may be a passing
+   load. A computer at a hard ceiling is therefore found out within a few points of it
+   and then tested once in a while, instead of every twenty seconds.
+6. *Fast recovery when the load passes.* The same accelerating probe gets a game that was
+   slowed for a battle back to full speed in about half a minute once the battle is over
+   (45% → 100% in ~35 s), where v1.0 crept up a point at a time and took eight minutes
+   from 17%.
 7. *A floor by default.* `Server.MinGameSpeed` defaults to 50. A player whose computer
    needs the game slower than half speed is left behind (like a spectator: relayed, never
    waited for) instead of dragging everyone to a pace at which the game ended anyway in
@@ -253,14 +260,15 @@ whole connection stalled; the client had nothing to simulate).
 |---|---|---|
 | `Server.MaxPlayerBuffer` | `1500` | Largest buffer (ms) the server will build for a player whose connection drops out, at the cost of that player's own input delay. `0` disables adaptive buffering (fixed 150 ms for everyone, as in v1.0). |
 | `Server.MaxCatchUpSpeed` | `400` | Fastest speed (percent of normal) a client far behind is asked to run at while catching up. |
-| `Server.MaxWaitForStalledPlayer` | `8000` | Longest the game pauses (ms) for a player who was keeping up and has stopped responding, before continuing without them. |
+| `Server.MaxWaitForStalledPlayer` | `3000` | Longest the game pauses (ms) for a player who was keeping up and has stopped responding, before continuing without them. `0` never pauses. |
 | `Server.MinGameSpeed` | `50` (was `0`) | Floor for slowing the game for a slow computer; a player needing less is left behind. |
 
 Everything else that changed is an internal constant derived from things the server
-already measures: the hole threshold (2.5 frame periods), the buffer half-life (120 s),
-the catch-up formula, the ceiling hold (60 s) and probe rate (0.5 points/s), the fast
-recovery fraction (15% of the excess per second). They are listed at the top of
-`FrameScheduler.cs` with their reasons.
+already measures: the hole threshold (2.5 frame periods and 3× the client's own cadence),
+the burst window (20 ms), the buffer half-life (120 s), the catch-up formula
+(1 + 0.8 × seconds behind), the probe rate (0.5 points/s, doubling every 10 s to 4) and
+the hold (30 s, doubling to 120 s). They are listed at the top of `FrameScheduler.cs`
+with their reasons.
 
 ### How the defaults were chosen, and how to tune
 

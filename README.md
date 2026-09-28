@@ -22,12 +22,18 @@ advance, so one bad connection produces game-wide freezes. On a ZeroLag server:
 
 - Your input delay follows **your own** connection, not the worst one in the game. A player
   on a bad connection feels their own delay; nobody else does.
+- A player whose **connection drops out** gets a buffer sized to their dropouts (up to
+  1.5 s), so their game keeps running through them instead of freezing and fast-forwarding.
+  Only their own commands take longer; nobody else is affected. They are told, and can turn
+  it off or set it themselves with **`!buffer`**. A dropout never slows the game for anyone.
 - A player whose **computer** can't keep up (long games, many units) slows the game down
-  **smoothly** instead of the stock stop-start stutter. The chat says so — *"Slowing the
-  game to 78% so that the slowest computer can keep up."* — and says when it is back to
-  full speed. The player concerned is told privately; the others are not told who it is
-  unless the host enables that.
-- Type **`!speed`** in the chat to ask the current game speed.
+  **smoothly** instead of the stock stop-start stutter, but never below 50% by default: a
+  computer that needs less is left behind, like a spectator, and catches back up at turbo
+  speed if its load drops. The chat says so — *"Slowing the game to 78% so that the slowest
+  computer can keep up."* — and says when it is back to full speed. The player concerned is
+  told privately; the others are not told who it is unless the host enables that.
+- Type **`!speed`** in the chat to ask the current game speed, **`!quiet`** to hide the speed
+  messages for yourself.
 - If the host enables it, type **`!kickslow`** to vote to kick whichever player the game
   is currently being slowed down for, without needing to know who it is. It follows the
   normal vote-kick rules (majority, 30 s timeout, cooldown).
@@ -35,9 +41,10 @@ advance, so one bad connection produces game-wide freezes. On a ZeroLag server:
 
 The trade-off: players on good connections get *lower* delay than before (about 280 ms
 instead of 400 ms at normal speed); a player on a bad connection feels more of their own
-delay. A connection that stops responding entirely still pauses the game for everyone
-after about two seconds, exactly as before, so the familiar "connection problems" /
-vote-kick flow is unchanged.
+delay. A connection that stops responding entirely pauses the game for everyone for at most
+three seconds (after a few seconds of silence), then the game continues without that player;
+the stock "connection problems" dialog and 60 s drop are unchanged, and the player catches
+up if they come back.
 
 ## For server hosts
 
@@ -57,25 +64,32 @@ server. See [SERVER-INSTALL.md](SERVER-INSTALL.md) for a step-by-step version wi
 |---|---|---|
 | `Server.Netcode` | `dynamic` | `dynamic` = ZeroLag scheduling; `classic` = the original fixed-latency relay, for A/B testing or rollback without swapping files. |
 | `Server.MaxPlayerLag` | `3000` | Milliseconds a slow-PC player may fall behind (absorbing the lag alone) before the whole game is slowed for them. 3 s means temporary dips such as big battles usually never touch the other players; `0` slows everyone as soon as anyone falls behind. |
-| `Server.MinGameSpeed` | `0` | `0` = no floor: the game follows the slowest computer, as stock does. `75` = never slow below 75%; a computer that needs less is left to fall behind on its own (for that player it is much like being kicked). |
-| `Server.AnnounceGameSpeed` | `True` | Chat messages when the game slows down or speeds up (at most one every 30 s). |
+| `Server.MinGameSpeed` | `50` | Never slow the game below this percentage for a slow computer; a computer that needs less is left to fall behind on its own, and catches up at turbo speed if it recovers. `0` = no floor: the game follows the slowest computer however slow, as stock does. |
+| `Server.MaxPlayerBuffer` | `1500` | Largest buffer (ms) built for a player whose connection drops out; costs only that player's own input delay. `0` disables it. |
+| `Server.MaxCatchUpSpeed` | `400` | Fastest speed (percent) a player far behind is asked to run at to catch up; players slightly behind are asked for much less. |
+| `Server.MaxWaitForStalledPlayer` | `3000` | Longest the game pauses (ms) for a player who stops responding, before continuing without them. `0` never pauses. |
+| `Server.AnnounceGameSpeed` | `True` | Chat messages when the game slows down and when it is back to full speed (at most one every 30 s); players can `!quiet` them. |
 | `Server.NameSlowestPlayer` | `False` | Name the player the game is slowed down for in those messages. |
 | `Server.VoteKickSlowest` | `False` | Enable the `!kickslow` vote. Also requires the stock `Server.EnableVoteKick`. |
 | `Server.ZeroLagNotice` | `False` | One line to each player on joining the lobby: that this is a ZeroLag server and which commands exist. Sent after your `motd.txt`. |
 
 **The server log** (`Logs/dedicated-server.log`) records every slowdown with the player's
-name and what their computer managed, lists players who are behind every 10 s, and writes
-a one-line summary for each player when they leave. `grep -E "Slowing|full speed|behind|Summary for"` is a good start.
+name and what their computer managed, every dropout that was turned into buffer, lists
+players who are behind every 10 s (and why), and writes a one-line summary for each player
+when they leave, including their connection's dropouts. `grep -E "Slowing|full speed|behind|dropped out|Summary for"` is a good start.
 
 ## How it works
 
 [NETCODE.md](NETCODE.md) describes the design: the server closes one network frame per
 period on its own clock and forwards whatever each client has sent by then (nothing if a
 client is late, several packets merged if it is catching up), keeps each client a small,
-steady distance behind with the existing per-client tick-scale message, and slows the whole
-game only when a computer genuinely cannot keep up. Release clients support all of this
-unchanged; the invariants they rely on (strictly consecutive frames per sender,
-acknowledgement counts, replay layout) are preserved and tested.
+steady distance behind with the existing per-client tick-scale message — a distance that
+grows for a client whose connection drops out — tells a client that has fallen behind to
+run faster in proportion to how far behind it is, and slows the whole game only when a
+computer genuinely cannot keep up, telling a dropout from a slow computer by the shape of
+the client's packet arrivals. Release clients support all of this unchanged; the invariants
+they rely on (strictly consecutive frames per sender, acknowledgement counts, replay layout)
+are preserved and tested.
 
 ## Testing
 

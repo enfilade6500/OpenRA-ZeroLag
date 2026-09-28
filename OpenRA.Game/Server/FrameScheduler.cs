@@ -486,7 +486,8 @@ namespace OpenRA.Server
 					if (!state.BufferNoticeSent && target >= BufferNoticeThreshold)
 					{
 						state.BufferNoticeSent = true;
-						notices.Add((index, $"Your connection dropped out for {length / 1000f:F1}s. The server now buffers {target / 1000f:F1}s of the game for you so that it keeps running through dropouts; your own commands take that much longer to happen. Type !buffer off to turn this off."));
+						notices.Add((index, $"Your connection dropped out for {length / 1000f:F1}s. The server now buffers {target / 1000f:F1}s of the game " +
+							"for you so that it keeps running through dropouts; your own commands take that much longer to happen. Type !buffer off to turn this off."));
 					}
 
 					// Log the growth in steps, not every hole
@@ -886,8 +887,9 @@ namespace OpenRA.Server
 					if (state.LastHoleReport < 0 || now - state.LastHoleReport > HoleReportInterval)
 					{
 						state.LastHoleReport = now;
-						log($"{describeClient(index)} is {b / 1000f:F1}s behind because of {(state.Holes.Any(h => h.Kind != HoleKind.Freeze) ? "connection dropouts" : "freezes")} " +
-							$"({holeMs / 1000f:F1}s in the last {elapsed / 1000f:F0}s), not their computer; the game is not slowed down for them.");
+						var cause = state.Holes.Any(h => h.Kind != HoleKind.Freeze) ? "connection dropouts" : "freezes";
+						log($"{describeClient(index)} is {b / 1000f:F1}s behind because of {cause} ({holeMs / 1000f:F1}s in the last {elapsed / 1000f:F0}s), " +
+							"not their computer; the game is not slowed down for them.");
 					}
 
 					continue;

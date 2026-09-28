@@ -124,7 +124,8 @@ namespace OpenRA.Server
 			if (continuedWithout.Count > 0)
 			{
 				var client = continuedWithout.Dequeue();
-				return Announce(now, $"{describeClient(client)} has stopped responding; the game continues without them. They can catch up if their connection comes back.");
+				return Announce(now, $"{describeClient(client)} has stopped responding; the game continues without them. " +
+					"They can catch up if their connection comes back.");
 			}
 
 			fastestSinceAnnounce = Math.Max(fastestSinceAnnounce, speedPercent);

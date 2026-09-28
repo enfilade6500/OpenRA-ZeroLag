@@ -434,7 +434,8 @@ namespace OpenRA.Test
 			}, maxPlayerLag: 3000);
 
 			Assert.That(bufferAfterFirstHole, Is.InRange(900, 1500), "A 1s download hole should become about 1s of buffer.");
-			Assert.That(s.GetBuffer(1).Value.Ms, Is.LessThan(bufferAfterFirstHole).And.GreaterThan(150), "The buffer should shrink slowly while the connection is quiet.");
+			Assert.That(s.GetBuffer(1).Value.Ms, Is.LessThan(bufferAfterFirstHole).And.GreaterThan(150),
+				"The buffer should shrink slowly while the connection is quiet.");
 			Assert.That(stallsBefore, Is.GreaterThan(50), "The first hole should have stopped P1's game.");
 			Assert.That(clients[1].Stalls - stallsAfter, Is.LessThan(10), "The second hole should not stop P1's game.");
 			Assert.That(logs.Any(l => l.Contains("P1's connection dropped out for") && l.Contains("buffering")), Is.True, "The buffer growth should be logged.");
@@ -477,8 +478,10 @@ namespace OpenRA.Test
 					cs[1].Capacity = 3.0;
 			}, maxPlayerLag: 3000);
 
-			Assert.That(logs.Any(l => l.StartsWith("Slowing the game", StringComparison.Ordinal)), Is.False, "A player who keeps up between freezes must never slow the game.");
-			Assert.That(logs.Any(l => l.Contains("P1 is") && l.Contains("because of freezes") && l.Contains("not their computer")), Is.True, "The log should attribute the lateness to the freezes.");
+			Assert.That(logs.Any(l => l.StartsWith("Slowing the game", StringComparison.Ordinal)), Is.False,
+				"A player who keeps up between freezes must never slow the game.");
+			Assert.That(logs.Any(l => l.Contains("P1 is") && l.Contains("because of freezes") && l.Contains("not their computer")), Is.True,
+				"The log should attribute the lateness to the freezes.");
 			Assert.That(clients[1].MinScale, Is.LessThan(0.5f), "P1 should be asked for turbo speed.");
 			Assert.That(clients[0].NextFrame - clients[1].NextFrame, Is.LessThan(5), "P1 should be caught up again at the end.");
 			Assert.That(clients[0].Stalls, Is.LessThan(5), "The other player must not notice.");
@@ -498,7 +501,8 @@ namespace OpenRA.Test
 			Assert.That(logs.Any(l => l.StartsWith("Slowing the game", StringComparison.Ordinal)), Is.False, "Repeated outages must never slow the game.");
 			Assert.That(s.GetBuffer(1).Value.Ms, Is.GreaterThanOrEqualTo(1000), "The buffer should have grown to its cap.");
 			Assert.That(clients[1].MinScale, Is.LessThan(0.5f), "P1 should be asked for turbo speed.");
-			Assert.That(clients[0].NextFrame - clients[1].NextFrame, Is.LessThan(s.GetBuffer(1).Value.Ms / 120 + 5), "P1 should be caught up again, allowing for its buffer.");
+			Assert.That(clients[0].NextFrame - clients[1].NextFrame, Is.LessThan(s.GetBuffer(1).Value.Ms / 120 + 5),
+				"P1 should be caught up again, allowing for its buffer.");
 			Assert.That(clients[0].Stalls, Is.LessThan(5), "The other player must not notice.");
 		}
 
@@ -537,7 +541,8 @@ namespace OpenRA.Test
 					speeds.Add(sched.SpeedPercent);
 			});
 
-			Assert.That(logs.Count(l => l.StartsWith("Slowing the game", StringComparison.Ordinal)), Is.LessThanOrEqualTo(4), "A steadily slow computer should cause few slowdowns.");
+			Assert.That(logs.Count(l => l.StartsWith("Slowing the game", StringComparison.Ordinal)), Is.LessThanOrEqualTo(4),
+				"A steadily slow computer should cause few slowdowns.");
 			Assert.That(speeds.Min(), Is.GreaterThanOrEqualTo(50));
 			Assert.That(speeds.Max(), Is.LessThanOrEqualTo(70), "After settling the speed should stay close to the computer's capacity.");
 			Assert.That(logs.Any(l => l.Contains("will not be sped up again for")), Is.True, "A failed probe should be held.");
@@ -658,7 +663,8 @@ namespace OpenRA.Test
 			Assert.That(a.Tick(120000, 100, null, 0, -1, 10), Is.Null, "Full speed should wait for the settle time.");
 			Assert.That(a.Tick(131000, 100, null, 0, -1, 10)?.Message, Is.EqualTo("The game is back to full speed."));
 			a.ContinuedWithout(2);
-			Assert.That(a.Tick(132000, 100, null, 0, -1, 10)?.Message, Does.StartWith("P2 has stopped responding; the game continues without them"), "Continuing without a stopped player should be announced at once.");
+			Assert.That(a.Tick(132000, 100, null, 0, -1, 10)?.Message, Does.StartWith("P2 has stopped responding; the game continues without them"),
+				"Continuing without a stopped player should be announced at once.");
 			Assert.That(a.Tick(133000, 100, null, 0, -1, 10), Is.Null);
 		}
 

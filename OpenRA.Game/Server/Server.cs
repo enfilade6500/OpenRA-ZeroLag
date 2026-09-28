@@ -1156,8 +1156,12 @@ namespace OpenRA.Server
 			if (current == null)
 				return "You are not in this game.";
 
-			string Describe((FrameScheduler.BufferMode Mode, int Ms) b) =>
-				b.Mode == FrameScheduler.BufferMode.Off ? "off (150 ms, the minimum)" : $"{b.Ms / 1000f:F1}s ({(b.Mode == FrameScheduler.BufferMode.Auto ? "automatic: grows when your connection drops out, shrinks when it is quiet" : "set by you")})";
+			static string Describe((FrameScheduler.BufferMode Mode, int Ms) b) => b.Mode switch
+			{
+				FrameScheduler.BufferMode.Off => "off (150 ms, the minimum)",
+				FrameScheduler.BufferMode.Auto => $"{b.Ms / 1000f:F1}s (automatic: grows when your connection drops out, shrinks when it is quiet)",
+				_ => $"{b.Ms / 1000f:F1}s (set by you)",
+			};
 
 			if (argument.Length == 0)
 				return $"Your buffer is {Describe(current.Value)}. Type !buffer off, !buffer auto or !buffer <seconds> (e.g. !buffer 1.5) to change it. " +

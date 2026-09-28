@@ -87,9 +87,10 @@ namespace OpenRA.Server
 		const float MaxTickScale = 1.6f;
 
 		// A client far behind is asked to run about (1 + this * seconds behind) times normal speed: half a second behind
-		// is a gentle 1.4x, three seconds is flat out. Because the client is told once per interval, a factor below 1
-		// also means it can close at most its whole deficit per interval, so it cannot overshoot and run dry.
-		const float CatchUpPerSecondBehind = 0.8f;
+		// is a gentle 1.3x, five seconds is flat out. Because the client is told once per interval, and the measured
+		// lateness is already half an interval old, the same fraction as Gain means it closes only part of its deficit
+		// per interval and lands on its target without overshooting into running dry.
+		const float CatchUpPerSecondBehind = Gain;
 
 		// A gap between two packets from a client longer than this many frame periods, and than this multiple of the
 		// client's own typical gap, is a hole: the client sent nothing for that long. Holes are how connection dropouts
@@ -300,6 +301,7 @@ namespace OpenRA.Server
 		bool blocked;
 		bool gaveUp;
 		long blockedSince;
+		readonly HashSet<int> waitedFor = new();
 		long lastResumeTime = -1;
 		string blockedBy;
 		int shortWaits;
@@ -724,6 +726,7 @@ namespace OpenRA.Server
 				{
 					blockedSince = now;
 					blockedBy = string.Join(", ", waitingFor.Select(describeClient));
+					waitedFor.UnionWith(waitingFor);
 
 					// Don't log the start of every wait in a rapid sequence; they are reported in aggregate
 					if (lastResumeTime < 0 || now - lastResumeTime > 1000)
@@ -748,9 +751,11 @@ namespace OpenRA.Server
 				}
 
 				// The other clients had nothing to send while the game was paused; that gap is not a hole in their connections
-				foreach (var state in clients.Values)
-					if (state.OpenHoleStart < 0)
+				foreach (var (index, state) in clients)
+					if (state.OpenHoleStart < 0 && !waitedFor.Contains(index))
 						state.LastArrivalTime = now;
+
+				waitedFor.Clear();
 			}
 
 			frame = nextFrame++;

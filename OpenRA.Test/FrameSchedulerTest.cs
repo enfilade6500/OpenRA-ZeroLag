@@ -510,7 +510,7 @@ namespace OpenRA.Test
 
 			Assert.That(logs.Any(l => l.StartsWith("Slowing the game", StringComparison.Ordinal)), Is.False, "Repeated outages must never slow the game.");
 			Assert.That(s.GetBuffer(1).Value.Ms, Is.GreaterThanOrEqualTo(1000), "The buffer should have grown to its cap.");
-			Assert.That(clients[1].MinScale, Is.LessThan(0.5f), "P1 should be asked for turbo speed.");
+			Assert.That(clients[1].MinScale, Is.LessThan(0.6f), "P1 should be asked for more than the ordinary 143%.");
 			Assert.That(clients[0].NextFrame - clients[1].NextFrame, Is.LessThan(s.GetBuffer(1).Value.Ms / 120 + 5),
 				"P1 should be caught up again, allowing for its buffer.");
 			Assert.That(clients[0].Stalls, Is.LessThan(5), "The other player must not notice.");

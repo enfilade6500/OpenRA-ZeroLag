@@ -479,7 +479,7 @@ static class Tests
 
 		Check(!logs.Any(l => l.StartsWith("Slowing the game")), "repeated outages never slow the game");
 		Check(s.GetBuffer(1).Value.Ms >= 1000, $"the buffer grew to its cap ({s.GetBuffer(1).Value.Ms}ms)");
-		Check(clients[1].MinScale < 0.5f, $"P1 is asked for turbo speed (scale {clients[1].MinScale})");
+		Check(clients[1].MinScale < 0.6f, $"P1 is asked for more than the ordinary 143% (scale {clients[1].MinScale})");
 		var apart = clients[0].NextFrame - clients[1].NextFrame;
 		Check(apart < s.GetBuffer(1).Value.Ms / 120 + 5, $"P1 is caught up again at the end, allowing for its buffer ({apart} frames apart, buffer {s.GetBuffer(1).Value.Ms}ms)");
 		Check(clients[0].Stalls < 5, $"the other player never noticed ({clients[0].Stalls} stalled ticks)");

@@ -208,8 +208,8 @@ be a freeze. A freeze that shows a buffer to be pointless takes it away again.
    is fine between dropouts never slows the game; a hole longer than the buffer is theirs
    to absorb (the lag budget) and to catch up.
 3. *Graduated catch-up.* How much faster a client is asked to run grows with how far
-   behind it is: about 1 + 0.8 × (seconds behind), so 0.5 s behind is 1.4×, 1 s is 1.8×,
-   and 4 s or more is the cap, `Server.MaxCatchUpSpeed` (default 400%). Small hitches stay
+   behind it is: about 1 + 0.6 × (seconds behind), so 0.5 s behind is 1.3×, 1 s is 1.6×,
+   and 5 s or more is the cap, `Server.MaxCatchUpSpeed` (default 400%). Small hitches stay
    gentle; a player far behind fast-forwards, which is right, because their orders are
    based on a world several seconds old whatever the speed. The formula also means a
    client closes at most its whole deficit per control interval, so it cannot overshoot
@@ -271,7 +271,7 @@ be a freeze. A freeze that shows a buffer to be pointless takes it away again.
 Everything else that changed is an internal constant derived from things the server
 already measures: the hole threshold (2.5 frame periods and 3× the client's own cadence),
 the burst window (20 ms), the buffer half-life (120 s), the catch-up formula
-(1 + 0.8 × seconds behind), the probe rate (0.5 points/s, doubling every 10 s to 4) and
+(1 + 0.6 × seconds behind), the probe rate (0.5 points/s, doubling every 10 s to 4) and
 the hold (30 s, doubling to 120 s). They are listed at the top of `FrameScheduler.cs`
 with their reasons.
 

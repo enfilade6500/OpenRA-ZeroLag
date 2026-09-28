@@ -114,8 +114,10 @@ namespace OpenRA.Server
 		const int FreezeMemory = 300000;
 
 		// Adaptive buffer: a download-side hole that stopped a client's game is turned into buffer, so that the next
-		// hole of that length does not stop it. The buffer shrinks back with this half-life (ms) when the connection
-		// has been quiet, by running the client imperceptibly fast.
+		// hole of that length does not stop it, once such holes have happened twice within this window (ms): a single
+		// hiccup costs nobody any delay. The buffer shrinks back with this half-life (ms) when the connection has been
+		// quiet, by running the client imperceptibly fast.
+		const int RecurrenceWindow = 120000;
 		const int BufferHalfLife = 120000;
 
 		// A player is told once, privately, when their buffer first grows past this (ms); the log notes growth in these steps (ms)
@@ -506,7 +508,8 @@ namespace OpenRA.Server
 			// so the gap we saw is exactly what was missing). Turn the time it lost into buffer instead of catching it
 			// up: its delay grows by that much, and the next hole of that length does not stop it.
 			var recentlyFroze = state.LastFreezeTime >= 0 && now - state.LastFreezeTime < FreezeMemory;
-			if (kind == HoleKind.Connection && state.BufferMode == BufferMode.Auto && maxPlayerBuffer > 0 && !state.ExemptFromPacing && !recentlyFroze)
+			var recurring = state.Holes.Count(h => h.Kind == HoleKind.Connection && h.End > now - RecurrenceWindow) >= 2;
+			if (kind == HoleKind.Connection && recurring && state.BufferMode == BufferMode.Auto && maxPlayerBuffer > 0 && !state.ExemptFromPacing && !recentlyFroze)
 			{
 				var target = (int)Math.Min(maxPlayerBuffer, state.TargetSlack + stopped);
 				if (target > state.TargetSlack)

@@ -414,30 +414,35 @@ namespace OpenRA.Test
 		[Test]
 		public void DownloadHoleBecomesBuffer()
 		{
-			// P1's download path dies for 1s at 10s and again at 30s. The first hole stops P1's game and is turned into
-			// buffer; the second hole of the same length is covered by that buffer, so P1's game does not stop again.
+			// P1's download path dies for 1s at 10s, 30s and 50s. One hiccup costs nothing; the second within two minutes
+			// shows a pattern and is turned into buffer; the third hole of the same length is covered by that buffer, so
+			// P1's game does not stop again.
+			var bufferAfterFirst = 0;
+			var bufferAfterSecond = 0;
 			var stallsBefore = 0;
 			var stallsAfter = 0;
-			var bufferAfterFirstHole = 0;
-			var (logs, s, clients) = RunWithCapacities(new[] { 2.0, 2.0 }, 45000, 0, (t, cs, sched) =>
+			var (logs, s, clients) = RunWithCapacities(new[] { 2.0, 2.0 }, 65000, 0, (t, cs, sched) =>
 			{
-				if (t == 10000 || t == 30000)
+				if (t == 10000 || t == 30000 || t == 50000)
 					cs[1].DownDeadUntil = t + 1000;
 				if (t == 12000)
+					bufferAfterFirst = sched.GetBuffer(1).Value.Ms;
+				if (t == 32000)
 				{
+					bufferAfterSecond = sched.GetBuffer(1).Value.Ms;
 					stallsBefore = cs[1].Stalls;
-					bufferAfterFirstHole = sched.GetBuffer(1).Value.Ms;
 				}
 
-				if (t == 28000)
+				if (t == 48000)
 					stallsAfter = cs[1].Stalls;
 			}, maxPlayerLag: 3000);
 
-			Assert.That(bufferAfterFirstHole, Is.InRange(900, 1500), "A 1s download hole should become about 1s of buffer.");
-			Assert.That(s.GetBuffer(1).Value.Ms, Is.LessThan(bufferAfterFirstHole).And.GreaterThan(150),
+			Assert.That(bufferAfterFirst, Is.EqualTo(150), "A single hiccup should cost no delay.");
+			Assert.That(bufferAfterSecond, Is.InRange(900, 1500), "The second 1s download hole should become about 1s of buffer.");
+			Assert.That(s.GetBuffer(1).Value.Ms, Is.LessThan(bufferAfterSecond).And.GreaterThan(150),
 				"The buffer should shrink slowly while the connection is quiet.");
-			Assert.That(stallsBefore, Is.GreaterThan(50), "The first hole should have stopped P1's game.");
-			Assert.That(clients[1].Stalls - stallsAfter, Is.LessThan(10), "The second hole should not stop P1's game.");
+			Assert.That(stallsBefore, Is.GreaterThan(100), "The first two holes should have stopped P1's game.");
+			Assert.That(clients[1].Stalls - stallsAfter, Is.LessThan(10), "The third hole should not stop P1's game.");
 			Assert.That(logs.Any(l => l.Contains("P1's connection dropped out for") && l.Contains("buffering")), Is.True, "The buffer growth should be logged.");
 			Assert.That(logs.Any(l => l.StartsWith("Slowing the game", StringComparison.Ordinal)), Is.False, "A dropout must never slow the game.");
 			Assert.That(clients[0].Stalls, Is.LessThan(5), "The other player must not notice.");
@@ -447,10 +452,10 @@ namespace OpenRA.Test
 		public void UploadStallAndFreezeDoNotKeepABuffer()
 		{
 			// An upload stall (the client kept playing; its packets arrived in a burst) is not what a buffer is for.
-			// A game freeze cannot be told from a dropout the first time, so the buffer grows; the second freeze,
-			// shorter than that buffer, proves the buffer is not helping and takes it away again.
-			var bufferAfterFirstFreeze = 0;
-			var (logs, s, _) = RunWithCapacities(new[] { 2.0, 2.0, 2.0 }, 40000, 0, (t, cs, sched) =>
+			// Game freezes cannot be told from dropouts at first, so two of them build a buffer; a third freeze, shorter
+			// than that buffer, proves the buffer is not helping and takes it away again.
+			var bufferAfterTwoFreezes = 0;
+			var (logs, s, _) = RunWithCapacities(new[] { 2.0, 2.0, 2.0 }, 50000, 0, (t, cs, sched) =>
 			{
 				if (t == 10000)
 				{
@@ -458,19 +463,21 @@ namespace OpenRA.Test
 					cs[2].FrozenUntil = t + 1000;
 				}
 
-				if (t == 15000)
-					bufferAfterFirstFreeze = sched.GetBuffer(2).Value.Ms;
+				if (t == 20000)
+					cs[2].FrozenUntil = t + 1000;
 				if (t == 25000)
+					bufferAfterTwoFreezes = sched.GetBuffer(2).Value.Ms;
+				if (t == 35000)
 					cs[2].FrozenUntil = t + 600;
 			}, maxPlayerLag: 3000);
 
 			Assert.That(s.GetBuffer(1).Value.Ms, Is.EqualTo(150), "An upload stall should leave the buffer alone.");
-			Assert.That(bufferAfterFirstFreeze, Is.GreaterThan(800), "The first freeze cannot be told from a dropout and should be buffered.");
-			Assert.That(s.GetBuffer(2).Value.Ms, Is.EqualTo(150), "A second, shorter freeze should show the buffer is pointless and remove it.");
+			Assert.That(bufferAfterTwoFreezes, Is.GreaterThan(800), "Two freezes cannot be told from dropouts and should be buffered.");
+			Assert.That(s.GetBuffer(2).Value.Ms, Is.EqualTo(150), "A third, shorter freeze should show the buffer is pointless and remove it.");
 			Assert.That(logs.Any(l => l.Contains("P2's game froze") && l.Contains("back to the normal buffer")), Is.True);
 			s.RemoveClient(2);
 			var summary = logs.Last(l => l.StartsWith("Summary for P2", StringComparison.Ordinal));
-			Assert.That(summary, Does.Contain("froze 2 time").And.Not.Contain("dropped out"));
+			Assert.That(summary, Does.Contain("froze 3 time").And.Not.Contain("dropped out"));
 		}
 
 		[Test]

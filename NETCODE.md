@@ -193,8 +193,10 @@ played through and leaves no hole, so a hole that the buffer should have covered
 be a freeze. A freeze that shows a buffer to be pointless takes it away again.
 
 1. *Adaptive per-player buffer.* Each client has its own target buffer instead of the
-   fixed 150 ms. When a download-side hole stops a client, the time it lost is converted
-   into buffer rather than caught up: its delay grows by the length of the hole, up to
+   fixed 150 ms. When download-side holes stop a client twice within two minutes (one
+   hiccup costs nobody anything; in the first day's replays 37% of players had one hole,
+   16% had two within two minutes), the time it lost is converted into buffer rather
+   than caught up: its delay grows by the length of the hole, up to
    `Server.MaxPlayerBuffer` (default 1500 ms), and the next hole of that length no longer
    stops it at all, because it keeps playing from the buffer while the link is dead and
    the frames arrive in a burst afterwards. The buffer shrinks back gently (half-life two

@@ -388,27 +388,31 @@ static class Tests
 
 	static void DownloadHoleBecomesBuffer()
 	{
-		// P1's download path dies for 1s at 10s and again at 30s. The first hole stops P1's game and is turned into
-		// buffer; the second hole of the same length is covered by that buffer, so P1's game does not stop again.
-		var stallsBefore = 0; var stallsAfter = 0; var bufferAfterFirstHole = 0;
-		var (logs, s, clients) = RunWithCapacities(new[] { 2.0, 2.0 }, 45000, 0, (t, cs, sched) =>
+		// P1's download path dies for 1s at 10s, 30s and 50s. One hiccup costs nothing; the second within two minutes
+		// shows a pattern and is turned into buffer; the third hole of the same length is covered by that buffer, so
+		// P1's game does not stop again.
+		var bufferAfterFirst = 0; var bufferAfterSecond = 0; var stallsBefore = 0; var stallsAfter = 0;
+		var (logs, s, clients) = RunWithCapacities(new[] { 2.0, 2.0 }, 65000, 0, (t, cs, sched) =>
 		{
-			if (t == 10000 || t == 30000)
+			if (t == 10000 || t == 30000 || t == 50000)
 				cs[1].DownDeadUntil = t + 1000;
 			if (t == 12000)
+				bufferAfterFirst = sched.GetBuffer(1).Value.Ms;
+			if (t == 32000)
 			{
+				bufferAfterSecond = sched.GetBuffer(1).Value.Ms;
 				stallsBefore = cs[1].Stalls;
-				bufferAfterFirstHole = sched.GetBuffer(1).Value.Ms;
 			}
 
-			if (t == 28000)
+			if (t == 48000)
 				stallsAfter = cs[1].Stalls;
 		}, maxPlayerLag: 3000);
 
-		Check(bufferAfterFirstHole >= 900 && bufferAfterFirstHole <= 1500, $"a 1s download hole becomes about 1s of buffer ({bufferAfterFirstHole}ms)");
-		Check(s.GetBuffer(1).Value.Ms < bufferAfterFirstHole && s.GetBuffer(1).Value.Ms > 150, $"the buffer shrinks slowly while the connection is quiet ({s.GetBuffer(1).Value.Ms}ms after 15s)");
-		Check(stallsBefore > 50, $"the first hole stopped P1's game ({stallsBefore} stalled ticks)");
-		Check(clients[1].Stalls - stallsAfter < 10, $"the second hole did not ({clients[1].Stalls - stallsAfter} stalled ticks)");
+		Check(bufferAfterFirst == 150, $"a single hiccup costs no delay ({bufferAfterFirst}ms)");
+		Check(bufferAfterSecond >= 900 && bufferAfterSecond <= 1500, $"the second 1s download hole becomes about 1s of buffer ({bufferAfterSecond}ms)");
+		Check(s.GetBuffer(1).Value.Ms < bufferAfterSecond && s.GetBuffer(1).Value.Ms > 150, $"the buffer shrinks slowly while the connection is quiet ({s.GetBuffer(1).Value.Ms}ms after 15s)");
+		Check(stallsBefore > 100, $"the first two holes stopped P1's game ({stallsBefore} stalled ticks)");
+		Check(clients[1].Stalls - stallsAfter < 10, $"the third hole did not ({clients[1].Stalls - stallsAfter} stalled ticks)");
 		Check(logs.Any(l => l.Contains("P1's connection dropped out for") && System.Text.RegularExpressions.Regex.IsMatch(l, @"buffering (0\.[89]|1\.[0-2])s")), "the buffer growth is logged: " + (logs.FirstOrDefault(l => l.Contains("dropped out")) ?? "(nothing)"));
 		Check(!logs.Any(l => l.StartsWith("Slowing the game")), "a dropout never slows the game");
 		Check(clients[0].Stalls < 5, $"the other player never noticed ({clients[0].Stalls} stalled ticks)");
@@ -417,10 +421,10 @@ static class Tests
 	static void UploadStallAndFreezeDoNotKeepABuffer()
 	{
 		// An upload stall (the client kept playing; its packets arrived in a burst) is not what a buffer is for.
-		// A game freeze cannot be told from a dropout the first time, so the buffer grows; the second freeze,
-		// shorter than that buffer, proves the buffer is not helping and takes it away again.
-		var bufferAfterFirstFreeze = 0;
-		var (logs, s, clients) = RunWithCapacities(new[] { 2.0, 2.0, 2.0 }, 40000, 0, (t, cs, sched) =>
+		// Game freezes cannot be told from dropouts at first, so two of them build a buffer; a third freeze, shorter
+		// than that buffer, proves the buffer is not helping and takes it away again.
+		var bufferAfterTwoFreezes = 0;
+		var (logs, s, clients) = RunWithCapacities(new[] { 2.0, 2.0, 2.0 }, 50000, 0, (t, cs, sched) =>
 		{
 			if (t == 10000)
 			{
@@ -428,19 +432,21 @@ static class Tests
 				cs[2].FrozenUntil = t + 1000;
 			}
 
-			if (t == 15000)
-				bufferAfterFirstFreeze = sched.GetBuffer(2).Value.Ms;
+			if (t == 20000)
+				cs[2].FrozenUntil = t + 1000;
 			if (t == 25000)
+				bufferAfterTwoFreezes = sched.GetBuffer(2).Value.Ms;
+			if (t == 35000)
 				cs[2].FrozenUntil = t + 600;
 		}, maxPlayerLag: 3000);
 
 		Check(s.GetBuffer(1).Value.Ms == 150, $"an upload stall leaves the buffer alone ({s.GetBuffer(1).Value.Ms}ms)");
-		Check(bufferAfterFirstFreeze > 800, $"the first freeze is taken for a dropout and buffered ({bufferAfterFirstFreeze}ms)");
-		Check(s.GetBuffer(2).Value.Ms == 150, $"a second, shorter freeze shows the buffer is pointless and removes it ({s.GetBuffer(2).Value.Ms}ms)");
+		Check(bufferAfterTwoFreezes > 800, $"two freezes are taken for dropouts and buffered ({bufferAfterTwoFreezes}ms)");
+		Check(s.GetBuffer(2).Value.Ms == 150, $"a third, shorter freeze shows the buffer is pointless and removes it ({s.GetBuffer(2).Value.Ms}ms)");
 		Check(logs.Any(l => l.Contains("P2's game froze") && l.Contains("back to the normal buffer")), "the correction is logged");
 		s.RemoveClient(2);
 		var summary = logs.Last(l => l.StartsWith("Summary for P2"));
-		Check(summary.Contains("froze 2 time") && !summary.Contains("dropped out"), "both freezes are reported as freezes: " + summary);
+		Check(summary.Contains("froze 3 time") && !summary.Contains("dropped out"), "all three freezes are reported as freezes: " + summary);
 	}
 
 	static void StallsDoNotSetThePace()

@@ -178,8 +178,14 @@ grep -E "Netcode:|Slowing|too slow|caught up|full speed|behind|dropped out|buffe
 ```
 
 - `Slowing the game to 78% ... so that Name can keep up (their computer is managing 80% ...)` —
-  a player's PC couldn't keep up and the game was slowed. `... The game will not be sped up
-  again for 30s.` means an attempt to speed back up had just failed.
+  a player's PC couldn't keep up and the game was slowed. The game then sits just under
+  that speed and edges up while the player keeps up; `Name has kept up at 83% for 15s;
+  probing for more speed.` means it is being sped back up properly, and `Speeding the game
+  up to 92% was too much for Name (0.4s behind and falling further); back to 82%.` means
+  that attempt found the ceiling again and the game went back to what the player managed.
+- `Name has left; speeding the game back up.` — the player the game was slowed down for is
+  gone; the game speeds up from where it is and stops wherever the next-slowest computer's
+  ceiling turns out to be.
 - `Name's connection dropped out for 1.2s; buffering 1.4s for them from now on.` — a
   dropout was turned into buffer for that player; nobody else is affected.
 - `Name is 3.4s behind because of connection dropouts (2.1s in the last 3s), not their
@@ -191,8 +197,10 @@ grep -E "Netcode:|Slowing|too slow|caught up|full speed|behind|dropped out|buffe
   `Server.MaxWaitForStalledPlayer`.
 - `Summary for Name: worst 2.1s behind, average 0.3s; caused 1 slowdown(s). Their computer
   managed 80% while it was slowing the game, and at least 143% at best. Their connection
-  dropped out 12 time(s), 6.1s in total, longest 1.4s; buffered up to 1.5s for them.` — one
-  line per player when they leave.
+  dropped out 12 time(s), 6.1s in total, longest 1.4s; buffered up to 1.5s for them. Their
+  packets were delayed 40 time(s), 15.2s in total (their game kept running).` — one line per
+  player when they leave. "Dropped out" stopped their game; "delayed" only held up their
+  packets (a bursty or congested line) and cost nobody anything but their own commands.
 
 Note that the stock server truncates `dedicated-server.log` every time the process starts;
 copy it, or rotate it from your service manager, if you want to keep it. Server-side replays

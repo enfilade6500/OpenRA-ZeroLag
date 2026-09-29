@@ -44,6 +44,14 @@ Wi-Fi hiccup, looks like to the game). Byte order is always preserved, like TCP.
 | slowcpu | p4's PC needs 44ms per 40ms tick (~90% speed at best) |
 | chaos | every player has a different problem, 600 APM |
 | leave | p4 quits mid-game; a 5th client never readies and is kicked at start |
+| holetrain, decline, lossload, outage8, deadlink, plateau, floorreturn | patterns measured in real games (see NETCODE.md, v1.1) |
+| melo | the 14-player game from v1.1's first day: p4's PC fine, then ~60% for two minutes, then ~85%, then fine (run 420s) |
+| wander | a PC whose ceiling wanders between ~66% and ~92% for eight minutes (run 480s) |
+| nextslowest | p4 at ~60% and p3 at ~80%; p4 leaves after two minutes and p3's ceiling must be found gently (run 240s) |
+
+`tools/score12.py v11,v12` scores the last three (and the regression suite) per server build;
+`tools/policysim.py` is the one-second model of the control loop the v1.2 policy was chosen
+with (`--sweep` runs the variants, `--trace dip creep0.3` prints a timeline).
 
 ## Metrics (per client, after a 5s warm-up)
 

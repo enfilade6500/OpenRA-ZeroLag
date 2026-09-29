@@ -27,16 +27,20 @@ advance, so one bad connection produces game-wide freezes. On a ZeroLag server:
   Only their own commands take longer; nobody else is affected. They are told, and can turn
   it off or set it themselves with **`!buffer`**. A dropout never slows the game for anyone.
 - A player whose **computer** can't keep up (long games, many units) slows the game down
-  **smoothly** instead of the stock stop-start stutter, but never below 30% by default: a
-  computer that needs less is left behind, like a spectator, and catches back up at turbo
-  speed if its load drops. Above that it is the players' call. The chat says so — *"Slowing the game to 78% so that the slowest
-  computer can keep up."* — and says when it is back to full speed. The player concerned is
-  told privately; the others are not told who it is unless the host enables that.
+  **smoothly** instead of the stock stop-start stutter, to what that computer was measured
+  managing, and the game then sits just under that ceiling and edges back up as the load
+  passes, rather than speeding up and slowing down every minute. Never below 30% by
+  default: a computer that needs less is left behind, like a spectator, and catches back up
+  at turbo speed if its load drops. Above that it is the players' call. The chat says so —
+  *"Slowing the game to 78% so that the slowest computer can keep up."* — and says when it
+  is back to full speed. The player concerned is told privately; the others are not told who
+  it is unless the host enables that.
 - Type **`!speed`** in the chat to ask the current game speed, **`!quiet`** to hide the speed
   messages for yourself.
 - If the host enables it, type **`!kickslow`** to vote to kick whichever player the game
-  is currently being slowed down for, without needing to know who it is. It follows the
-  normal vote-kick rules (majority, 30 s timeout, cooldown).
+  is currently being slowed down for, without needing to know who it is. A majority of the
+  players still in the game is needed; votes stand for as long as that player keeps the
+  game slow, so they can be typed whenever each player gets fed up.
 - Spectators and defeated players never slow the game or make it wait.
 
 The trade-off: players on good connections get *lower* delay than before (about 280 ms

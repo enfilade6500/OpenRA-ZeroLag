@@ -212,6 +212,31 @@ namespace NetHarness
 				p4.Cpu = new CpuSpec { Schedule = "0:100,60:100,62:10" };
 				return new() { Good("p1"), Good("p2"), Good("p3"), p4 };
 			}),
+
+			// Scenarios from the first day of v1.1 (see NETCODE.md, "v1.2")
+			["melo"] = ("the 14-player 'Melo' case: p4's PC is fine for a minute, slides to ~60% over 30s as a battle builds, stays there two minutes, recovers to ~85% and later to ~105% (run 420s)", () =>
+			{
+				var p4 = Good("p4");
+				p4.Cpu = new CpuSpec { Schedule = "0:39,60:39,90:67,210:67,240:47,360:47,390:38" };
+				return new() { Good("p1"), Good("p2"), Good("p3"), p4 };
+			}),
+
+			["wander"] = ("the 'K$' case: p4's PC wanders between ~66% and ~92% on a minute-and-a-half timescale for eight minutes (run 480s)", () =>
+			{
+				var p4 = Good("p4");
+				p4.Cpu = new CpuSpec { Schedule = "0:47,60:52,120:60,210:46,270:44,330:56,420:50,480:60" };
+				return new() { Good("p1"), Good("p2"), Good("p3"), p4 };
+			}),
+
+			["nextslowest"] = ("p4's PC manages ~60% and p3's ~80%; p4 leaves after two minutes, and the game must find p3's ceiling without leaving p3 seconds behind (run 240s)", () =>
+			{
+				var p3 = Good("p3");
+				p3.Cpu = new CpuSpec { TickMs = 50 };
+				var p4 = Good("p4");
+				p4.Cpu = new CpuSpec { TickMs = 67 };
+				p4.LeaveAfterSec = 120;
+				return new() { Good("p1"), Good("p2"), p3, p4 };
+			}),
 		};
 	}
 

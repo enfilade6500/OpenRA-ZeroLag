@@ -227,7 +227,7 @@ be a freeze. A freeze that shows a buffer to be pointless takes it away again.
 
 **Compute side.**
 
-5. *Probe and hold.* Speeding back up is a probe: once everyone is keeping up the speed
+5. *Probe and hold* (replaced by the creeping hold in v1.2, below). Speeding back up is a probe: once everyone is keeping up the speed
    is raised by half a point per second, doubling every ten seconds while it succeeds (up
    to four points per second). As soon as a player starts falling behind while the probe
    runs, it has failed: the speed goes straight back to where the probe started, without
@@ -295,6 +295,129 @@ fraction of time their game is stalled, their input delay, and the slowdowns the
 for the slow computer, speed changes per minute and time under 50%; for everyone else,
 nothing at all. A default is good when the table is green; the log after real games is
 the check on the harness.
+
+## v1.2: the creeping hold
+
+### Findings
+
+The first day of v1.1 on the two servers (58 games, 21.6 game-hours, 285 player-sessions,
+with every server replay) confirmed the connection side and found the compute side paying
+for its calm with speed:
+
+- Bounded waits, buffers and attribution behaved as designed: ten waits, six of them the
+  full 3 s and then on without the player (five of those players were gone for good; one
+  came back 5 s later 8.5 s behind and caught up at turbo), 51 buffers built and 20 later
+  undone by the freeze rule, no slowdown blamed on a connection. v1.0's day had a 56 s
+  pause and several of 8–11 s. The floor never triggered (lowest speed 34%).
+- 60% of the "dropouts" in the summaries were bursts: the packets were delayed and arrived
+  together, the game never stopped. One player with a 0.4 s delay every four seconds was
+  reported as "dropped out 208 times".
+- The slowdown *rate* was the same as v1.0's (2.0 episodes per game-hour, 16 of 58 games),
+  but an episode lasted 3.1 minutes instead of 1.8, and 58% of all game time lost was spent
+  in the hold after a failed probe. The probe climbs at up to four points a second, so by
+  the time a player "fails" they have kept up with every speed for 20–30 s; reverting to
+  where the probe *started* threw that away, for up to two minutes. In a 14-player game the
+  game sat at 54% for 14 minutes while the slowest player could manage 80%; the replay
+  shows his PC at 92% in minute six, 60% by minute eight (a battle), and back near 80%
+  whenever a probe got high enough to see it. Nine kick votes were started against him
+  before one passed.
+- The hold logic only applied to failures *during* a probe. Once a probe reached 100% a
+  player whose ceiling was just below it caused a fresh slowdown every minute: 22 of the
+  28 first slowdowns after "back to full speed" came within 60 s.
+- When the slowest player was kicked the game jumped to 100% and six of the remaining
+  thirteen fell behind at once; nobody had been tested above 54% for fifteen minutes.
+- Kick votes lapsed 30 s after the last vote (the stock timer, meant for a dialog everyone
+  answers at once), so in a big game they kept resetting: failures at 5, 6, 6 and 7 of the
+  8 needed. Players also typed `!kicklag`, `!kicksllow` and `!kickslow name`, none of which
+  counted.
+
+### The control problem
+
+A player's computer sustains some fraction of normal speed, c(t), which moves with the game
+(one player went 92% → 60% → 80% within five minutes). The server picks one pace for
+everyone. The catch is that c is *censored*: it can only be measured while the pace is
+above it, when the player is behind and running flat out, because in lockstep a client can
+never run ahead of the frames it has been sent. To find the ceiling you have to hit it,
+and hitting it costs that player lag and, past their budget, everyone a speed change.
+Probing too gently leaves the game slow after the load has passed; probing too fast
+overshoots, because the loop needs a second to deliver the pace and about three to confirm
+a trend, so at four points a second a failure lands 12–15 points above the ceiling. This
+is TCP congestion control almost literally, and the two ideas that fixed TCP apply:
+operate at the measured bottleneck rate (BBR), and grow slowly near the last known
+ceiling, fast away from it (CUBIC).
+
+`netcode-tests/tools/policysim.py` is a one-second model of the loop (capacity traces
+shaped like the real players, holes, measurement jitter, the client's one-interval delay,
+a replica of the v1.1 controller) with the alternatives as switches. Averaged over the
+slow-player scenarios (a two-minute dip, a wandering ceiling, spikes, a steady ceiling,
+two slow players), 30 seeds each:
+
+| policy | game time lost | speed changes/h | slow player's mean lag | time > 1 s behind | worst lag |
+|---|---|---|---|---|---|
+| v1.0 | 21.5% | 99 | 1.6 s | 60% | 5.5 s |
+| v1.1 | 27.2% | 63 | 0.64 s | 20% | 5.2 s |
+| v1.1 with a measured revert | 24.2% | 65 | 0.80 s | 27% | 5.2 s |
+| dithered hold (±5% modulation) | 23.1% | 61 | 0.42 s | 14% | 2.9 s |
+| **creeping hold (v1.2)** | **23.5%** | **39** | **0.39 s** | **13%** | **3.0 s** |
+
+v1.0 was the fastest for the majority because it never waited, and paid with a speed change
+every 36 s and a slow player 1.6 s behind on average; its one real defect was blindness to
+holes (on a good PC with a bad line it lost 11% of the game; every later policy loses 0%).
+v1.1 bought calm at five points of speed and got a third of the calm it should have. The
+creeping hold sits two points from v1.0's speed with 60% fewer changes than v1.0 (40% fewer
+than v1.1) and a slow player behind a quarter as often. (The lost-time figures are for
+scenarios where a slow player is present throughout; the floor is about 21%.)
+
+### Changes
+
+**Compute side.**
+
+1. *Measured revert.* A failed probe goes back to the speed the failing player was measured
+   managing while they fell behind (never below where the probe started), instead of to
+   the probe's start.
+2. *The creeping hold* replaces the timed holds (MinHold, MaxHold and hold doubling are
+   gone). After any slowdown or revert the speed creeps up by 0.3 points a second while
+   the player it was slowed for keeps up, and is pulled back by 5 points a second for every
+   second they are behind beyond 100 ms, moving at most a point a second and never more
+   than 6% below the measured ceiling. The creep is a continuous, imperceptible probe and
+   the pull-back is its answer: a computer at a steady ceiling settles a point or two under
+   it and nothing else happens (in the model, 5 speed changes an hour instead of 37).
+   Once that player has shown no resistance for 15 s with the speed 3% above the measured
+   ceiling (a measurement is a few percent off either way, and the creep settles that on
+   its own), the ceiling has moved: the doubling probe from v1.1 starts. Being more than
+   200 ms behind resets the count; between 100 and 200 ms, and around a connection hole,
+   nothing counts either way, so the ordinary jitter of a client's lateness does not keep a
+   hold going forever.
+3. *Early slowdown.* A player is slowed down for when their projected lag over the next ten
+   seconds exceeds the budget (and they are at least half a second behind and falling),
+   not only once the whole 3 s is used up. In the model this is what brings the slow
+   player's worst lag from 5 s to 3 s, for about one extra change an hour.
+4. *Probe up when the slowest player leaves.* Nobody else has been tested above the current
+   speed, so the game speeds back up from where it is, starting at two points a second and
+   doubling, and whoever cannot keep up is found on the way. The chat says "Speeding the
+   game back up." at once and "back to full speed" when it gets there.
+
+**Votes, messages and log.**
+
+5. A `!kickslow` vote stands for as long as the same player keeps the game slow (a brief
+   return to full speed does not clear it; two minutes at full speed, or a slowdown for
+   someone else, does). `!kicklag`, `!kickslowest` and `!ks` count, words after the command
+   are ignored, and any other `!kick…` gets a one-line hint. Naming the slowest player
+   (`Server.NameSlowestPlayer`) remains the host's choice; the players in that game asked
+   for it.
+6. Summaries tell packet delays from dropouts ("their packets were delayed 175 times…
+   their game kept running" versus "dropped out 21 times"), only quote the best rate seen
+   when it says something, stop counting lag once a player is defeated, and a freeze only
+   reclassifies earlier dropouts of about the buffer's length (a 6.7 s dead connection is
+   not a freeze).
+7. "Everyone is waiting for X" is logged once a wait has lasted half a second, not for
+   waits of 0.0 s.
+
+No settings were added or changed. The constants (creep rate, gain, deadband, floor, free
+time, probe rates, trigger horizon) are at the top of `FrameScheduler.cs` with their
+reasons; the model in `policysim.py` is how to check a change to them (`--sweep` runs the
+variants), and the harness scenarios `melo`, `wander` and `nextslowest` are the same
+situations against the real client timing.
 
 ## Testing
 

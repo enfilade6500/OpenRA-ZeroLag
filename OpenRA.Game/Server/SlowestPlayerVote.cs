@@ -17,9 +17,12 @@ namespace OpenRA.Server
 {
 	/// <summary>
 	/// A vote, held through a chat command, to kick whichever player the game is currently being slowed down
-	/// for. Voters do not need to know who that is. The rules mirror the normal vote kick: only players still in
-	/// the game (or the admin) can vote, a majority of them is needed, the vote lapses after Server.VoteKickTimer
-	/// without a new vote, and whoever started a failed vote cannot start another for Server.VoteKickerCooldown.
+	/// for. Voters do not need to know who that is. Only players still in the game (or the admin) can vote, and a
+	/// majority of them is needed. Unlike the normal vote kick, which everyone answers at once in a dialog, votes
+	/// are typed whenever a player gets fed up, so they do not lapse after a fixed time: they stand for as long as
+	/// the same player keeps the game slow (a brief return to full speed does not clear them), and are cancelled
+	/// only when the game has not been slowed down for that player for TargetGrace, or is slowed down for
+	/// someone else instead.
 	/// </summary>
 	public sealed class SlowestPlayerVote
 	{
@@ -31,13 +34,27 @@ namespace OpenRA.Server
 
 		public const string Command = "!kickslow";
 
+		// Typos and guesses seen in the wild count as the command too
+		static readonly string[] Aliases = { "!kickslow", "!kicklag", "!kickslowest", "!kickslower", "!ks" };
+
+		// How long the game may run at full speed, or be slowed down for nobody, before the votes are cleared (ms)
+		const int TargetGrace = 120000;
+
 		readonly Server server;
 		readonly HashSet<int> votes = new();
-		readonly Dictionary<int, long> failedStarters = new();
 
 		int target = -1;
-		int starter = -1;
-		long lastVoteTime;
+		long lastTargetTime;
+
+		/// <summary>Whether a chat command (already lower-cased, starting with '!') is a vote, allowing for extra words after it.</summary>
+		public static bool IsCommand(string command)
+		{
+			var word = command.Split(' ', 2)[0];
+			return Aliases.Contains(word);
+		}
+
+		/// <summary>Whether a chat command looks like an attempt to kick someone by other means (so the player can be pointed at the vote).</summary>
+		public static bool LooksLikeKick(string command) => command.StartsWith("!kick", System.StringComparison.Ordinal) && !IsCommand(command);
 
 		public SlowestPlayerVote(Server server)
 		{
@@ -73,17 +90,6 @@ namespace OpenRA.Server
 			if (InProgress && target != slowest.Value)
 				End("The player the game was slowed down for has changed; the vote to kick the slowest player is cancelled.");
 
-			if (!InProgress)
-			{
-				if (failedStarters.TryGetValue(conn.PlayerIndex, out var failedAt) && now - failedAt < server.Settings.VoteKickerCooldown)
-				{
-					server.SendOrderTo(conn, "Message", "You cannot start another vote yet.");
-					return;
-				}
-
-				failedStarters.Remove(conn.PlayerIndex);
-			}
-
 			var targetConn = server.Conns.FirstOrDefault(c => c.Validated && c.PlayerIndex == slowest.Value);
 			var targetClient = targetConn != null ? server.GetClient(targetConn) : null;
 			if (targetClient == null)
@@ -112,22 +118,21 @@ namespace OpenRA.Server
 			if (!InProgress)
 			{
 				target = slowest.Value;
-				starter = conn.PlayerIndex;
+				lastTargetTime = now;
 				votes.Clear();
 				Log.Write("server", $"{voter.Name} started a vote to kick the slowest player ({targetClient.Name}).");
 			}
 
 			if (!votes.Add(conn.PlayerIndex))
 			{
-				server.SendOrderTo(conn, "Message", "You have already voted.");
+				server.SendOrderTo(conn, "Message", "You have already voted; the vote stands for as long as the game is slowed down for that player.");
 				return;
 			}
 
-			lastVoteTime = now;
 			votes.IntersectWith(voters);
 			var needed = eligible / 2 + 1;
 			if (votes.Count < needed)
-				server.SendMessage($"Vote to kick the slowest player: {votes.Count} of {needed} votes needed. Type {Command} to vote.");
+				server.SendMessage($"Vote to kick the slowest player: {votes.Count} of {needed} votes needed, {needed - votes.Count} more. Type {Command} to vote.");
 			else
 			{
 				Log.Write("server", $"Vote passed: kicking the slowest player, {targetClient.Name} (client {target}).");
@@ -140,19 +145,18 @@ namespace OpenRA.Server
 			}
 		}
 
-		/// <summary>Call regularly; ends a vote that has lapsed or lost its target.</summary>
+		/// <summary>Call regularly; ends a vote whose target has changed or has not been slowing the game for a while.</summary>
 		public void Tick(long now, int? slowest)
 		{
 			if (!InProgress)
 				return;
 
-			if (slowest != target)
+			if (slowest == target)
+				lastTargetTime = now;
+			else if (slowest.HasValue)
+				End("The game is now being slowed down for a different player; the vote to kick the slowest player is cancelled.");
+			else if (now - lastTargetTime > TargetGrace)
 				End("The game is no longer being slowed down for that player; the vote to kick the slowest player is cancelled.");
-			else if (now - lastVoteTime > server.Settings.VoteKickTimer)
-			{
-				failedStarters[starter] = now;
-				End("The vote to kick the slowest player has failed.");
-			}
 		}
 
 		void End(string message)
@@ -164,7 +168,6 @@ namespace OpenRA.Server
 		void Reset()
 		{
 			target = -1;
-			starter = -1;
 			votes.Clear();
 		}
 	}

@@ -381,23 +381,116 @@ namespace OpenRA.Test
 		}
 
 		[Test]
-		public void KickedSlowestPlayerRestoresFullSpeedAtOnce()
+		public void KickedSlowestPlayerSpeedsBackUp()
 		{
-			// P1 (80%) slows the game; at 30s P1 is kicked. The game must be back at 100% within a second,
-			// not ramp up over half a minute, and P0 must be told its normal tick length straight away.
-			var speedAfterKick = new List<(long T, int Speed, int Tick0)>();
-			var (logs, _, _) = RunWithCapacities(new[] { 2.0, 0.8, 2.0 }, 45000, 0, (t, cs, sched) =>
+			// P1 (80%) slows the game; at 30s P1 is kicked. Nobody else has been tested above 78% since, so the game
+			// does not jump to 100%: it speeds back up briskly from where it is, and is at full speed within 15s.
+			var speedAfterKick = new List<(long T, int Speed)>();
+			var (logs, _, _) = RunWithCapacities(new[] { 2.0, 0.8, 2.0 }, 50000, 0, (t, cs, sched) =>
 			{
 				if (t == 30000)
 					sched.RemoveClient(1);
 				if (t > 30000)
-					speedAfterKick.Add((t, sched.SpeedPercent, cs[0].TickMs));
+					speedAfterKick.Add((t, sched.SpeedPercent));
 			});
 
-			Assert.That(speedAfterKick.Select(x => x.Speed), Is.All.EqualTo(100), "Speed should be 100% from the first second after the kick.");
-			Assert.That(speedAfterKick.Skip(1).Select(x => x.Tick0), Is.All.LessThanOrEqualTo(40),
-				"The remaining players should run at normal tick length right after the kick.");
-			Assert.That(logs.Any(l => l.Contains("P1 has left; the game is back to full speed")), Is.True);
+			var speeds = speedAfterKick.Select(x => x.Speed).ToList();
+			Assert.That(speeds[0], Is.InRange(78, 99), "The game should not jump to full speed the second after the kick.");
+			Assert.That(speeds.Zip(speeds.Skip(1), (a, b) => b >= a), Is.All.True, "The speed should only rise after the kick.");
+			Assert.That(speedAfterKick.First(x => x.Speed == 100).T - 30000, Is.LessThanOrEqualTo(15000), "Full speed should be reached within 15s of the kick.");
+			Assert.That(logs.Any(l => l.Contains("P1 has left; speeding the game back up")), Is.True);
+		}
+
+		[Test]
+		public void LeavingSlowestPlayerFindsTheNextCeiling()
+		{
+			// P1 (60%) slows the game; P2 (80%) is quietly fine at that speed. When P1 leaves, the game probes up and
+			// P2's ceiling is found on the way: a brief overshoot, then a hold near 80%, never a jump to 100% that
+			// leaves P2 three seconds behind.
+			var maxP2Gap = 0;
+			var (logs, s, _) = RunWithCapacities(new[] { 2.0, 0.6, 0.8 }, 120000, 0, (t, cs, sched) =>
+			{
+				if (t == 40000)
+					sched.RemoveClient(1);
+				if (t > 40000)
+					maxP2Gap = Math.Max(maxP2Gap, cs[0].NextFrame - cs[2].NextFrame);
+			}, maxPlayerLag: 3000);
+
+			var found = logs.Any(l => (l.StartsWith("Speeding the game up to", StringComparison.Ordinal) || l.StartsWith("Slowing the game", StringComparison.Ordinal))
+				&& l.Contains("P2"));
+			Assert.That(found, Is.True, "P2's ceiling should be found after P1 leaves.");
+			Assert.That(maxP2Gap * 120, Is.LessThan(2500), "P2 should never fall far behind while the game speeds up.");
+			Assert.That(s.SpeedPercent, Is.InRange(72, 92), "The game should settle near P2's ceiling.");
+		}
+
+		[Test]
+		public void FailedProbeRevertsToTheMeasuredSpeed()
+		{
+			// P1 manages 60% for 45s, then 85%. The creeping hold notices the ceiling has moved and probes; the probe
+			// fails somewhere above 85%, and the game goes back to what P1 was just measured managing, not to 60%.
+			var speedByTime = new List<(long T, int Speed)>();
+			var (logs, _, _) = RunWithCapacities(new[] { 2.0, 0.6 }, 130000, 0, (t, cs, sched) =>
+			{
+				if (t == 45000)
+					cs[1].Capacity = 0.85;
+				speedByTime.Add((t, sched.SpeedPercent));
+			}, maxPlayerLag: 3000);
+
+			var failure = logs.FirstOrDefault(l => l.StartsWith("Speeding the game up to", StringComparison.Ordinal));
+			Assert.That(failure, Is.Not.Null, "Precondition: a probe should fail after the ceiling rose.");
+			var backTo = int.Parse(failure.Split("back to ")[1].TrimEnd('.', '%'));
+			Assert.That(backTo, Is.GreaterThanOrEqualTo(75), "The revert should be to the measured speed, not the probe's start.");
+
+			// The failure is the first drop in speed after 60s (the probe's overshoot being reverted)
+			var after60 = speedByTime.Where(x => x.T > 60000).ToList();
+			var failedAt = after60.Zip(after60.Skip(1), (a, b) => (b.T, Drop: b.Speed < a.Speed - 3)).First(x => x.Drop).T;
+			Assert.That(speedByTime.Where(x => x.T >= failedAt).Min(x => x.Speed), Is.GreaterThanOrEqualTo(72),
+				"After the failure the game should stay near P1's new ceiling.");
+		}
+
+		[Test]
+		public void CreepingHoldSettlesWithoutProbing()
+		{
+			// P1 manages a steady 75%. After the first slowdown the creeping hold should settle a point or two under
+			// 75% and stay there: no timed probes, no failures, no further slowdowns.
+			var speeds = new List<int>();
+			var (logs, _, clients) = RunWithCapacities(new[] { 2.0, 0.75, 2.0 }, 180000, 0, (t, cs, sched) =>
+			{
+				if (t >= 40000)
+					speeds.Add(sched.SpeedPercent);
+			}, maxPlayerLag: 3000);
+
+			Assert.That(logs.Count(l => l.StartsWith("Slowing the game", StringComparison.Ordinal)), Is.LessThanOrEqualTo(2),
+				"A steady computer should cause at most two slowdowns.");
+			Assert.That(logs.Count(l => l.StartsWith("Speeding the game up to", StringComparison.Ordinal)), Is.LessThanOrEqualTo(1),
+				"At most one probe should fail in three minutes.");
+			Assert.That(speeds.Min(), Is.GreaterThanOrEqualTo(66));
+			Assert.That(speeds.Max(), Is.LessThanOrEqualTo(79), "The speed should stay within a few points of the ceiling.");
+			Assert.That(clients[0].NextFrame - clients[1].NextFrame, Is.LessThan(20), "P1 should stay close to the others.");
+		}
+
+		[Test]
+		public void ProjectedLagTriggersBeforeTheBudget()
+		{
+			// P1 manages 50% at full speed: it falls behind at half a second per second. With a 3s budget the outcome
+			// is clear long before 3s, so the slowdown comes early and P1 never carries the whole budget.
+			var (logs, _, _) = RunWithCapacities(new[] { 2.0, 0.5 }, 30000, 0, null, maxPlayerLag: 3000);
+			var first = logs.FirstOrDefault(l => l.StartsWith("Slowing the game", StringComparison.Ordinal));
+			Assert.That(first, Is.Not.Null, "Precondition: the game should have been slowed.");
+			var behind = float.Parse(first.Split(" and is ")[1].Split('s')[0], System.Globalization.CultureInfo.InvariantCulture);
+			Assert.That(behind, Is.LessThan(2.8f), "The first slowdown should come before the budget is used up.");
+		}
+
+		[Test]
+		public void VoteCommandsAreRecognised()
+		{
+			Assert.That(SlowestPlayerVote.IsCommand("!kickslow") && SlowestPlayerVote.IsCommand("!kicklag") && SlowestPlayerVote.IsCommand("!ks"), Is.True,
+				"Aliases should count as the vote.");
+			Assert.That(SlowestPlayerVote.IsCommand("!kickslow lincox"), Is.True, "A name after the command should not stop it counting.");
+			Assert.That(SlowestPlayerVote.IsCommand("!kick"), Is.False);
+			Assert.That(SlowestPlayerVote.LooksLikeKick("!kick kali") && SlowestPlayerVote.LooksLikeKick("!kicksllow"), Is.True,
+				"Other kick attempts should be recognised for a hint.");
+			Assert.That(SlowestPlayerVote.LooksLikeKick("!kickslow") || SlowestPlayerVote.LooksLikeKick("!speed"), Is.False);
 		}
 
 		[Test]
@@ -484,6 +577,9 @@ namespace OpenRA.Test
 			s.RemoveClient(2);
 			var summary = logs.Last(l => l.StartsWith("Summary for P2", StringComparison.Ordinal));
 			Assert.That(summary, Does.Contain("froze 3 time").And.Not.Contain("dropped out"));
+			s.RemoveClient(1);
+			var summary1 = logs.Last(l => l.StartsWith("Summary for P1", StringComparison.Ordinal));
+			Assert.That(summary1, Does.Contain("packets were delayed 1 time").And.Not.Contain("dropped out"), "An upload stall is a delay, not a dropout.");
 		}
 
 		[Test]
@@ -568,7 +664,8 @@ namespace OpenRA.Test
 				"A steadily slow computer should cause few slowdowns.");
 			Assert.That(speeds.Min(), Is.GreaterThanOrEqualTo(50));
 			Assert.That(speeds.Max(), Is.LessThanOrEqualTo(70), "After settling the speed should stay close to the computer's capacity.");
-			Assert.That(logs.Any(l => l.Contains("no faster for") || l.Contains("will not be sped up again for")), Is.True, "A failed probe should be held.");
+			Assert.That(logs.Count(l => l.StartsWith("Speeding the game up to", StringComparison.Ordinal)), Is.LessThanOrEqualTo(2),
+				"Probes against a steady ceiling should be rare.");
 		}
 
 		[Test]
@@ -587,7 +684,7 @@ namespace OpenRA.Test
 
 			Assert.That(logs.Any(l => l.StartsWith("Slowing the game", StringComparison.Ordinal)), Is.True, "Precondition: the game was slowed.");
 			Assert.That(backAt, Is.GreaterThan(0));
-			Assert.That(backAt - 25000, Is.LessThanOrEqualTo(50000), "The game should be back to full speed within 50s of the load passing.");
+			Assert.That(backAt - 25000, Is.LessThanOrEqualTo(60000), "The game should be back to full speed within 60s of the load passing.");
 		}
 
 		[Test]

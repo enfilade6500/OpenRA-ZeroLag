@@ -62,8 +62,8 @@ namespace OpenRA.Server
 		readonly Queue<int> continuedWithout = new();
 
 		/// <summary>
-		/// The player the game was slowed down for has been kicked, has left or has been defeated. The return
-		/// to full speed that follows is announced at once, so players see the effect.
+		/// The player the game was slowed down for has been kicked, has left or has been defeated. That the game is
+		/// speeding back up is announced at once, so players see the effect of a kick.
 		/// </summary>
 		public void SlowestPlayerGone()
 		{
@@ -113,10 +113,18 @@ namespace OpenRA.Server
 			if (slowestPlayerGone)
 			{
 				slowestPlayerGone = false;
-				if (speedPercent >= 100 && lastAnnouncedSpeed < 100)
+				if (lastAnnouncedSpeed < 100)
 				{
-					lastAnnouncedSpeed = fastestSinceAnnounce = 100;
-					return Announce(now, "The game is back to full speed.");
+					if (speedPercent >= 100)
+					{
+						lastAnnouncedSpeed = fastestSinceAnnounce = 100;
+						return Announce(now, "The game is back to full speed.");
+					}
+
+					// The game probes back up rather than jumping (the others have not been tested above this speed);
+					// say so now, and "back to full speed" follows when it gets there
+					lastAnnouncedSpeed = fastestSinceAnnounce = speedPercent;
+					return Announce(now, "Speeding the game back up.");
 				}
 			}
 

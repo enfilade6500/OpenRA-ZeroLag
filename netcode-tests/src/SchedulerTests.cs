@@ -355,23 +355,105 @@ static class Tests
 		Check(summary.Contains("while it was slowing the game"), "summary reports what the slow computer managed: " + summary);
 	}
 
-	static void KickedSlowestPlayerRestoresFullSpeedAtOnce()
+	static void KickedSlowestPlayerSpeedsBackUp()
 	{
-		// P1 (80%) slows the game; at 30s P1 is kicked. The game must be back at 100% within a second or two,
-		// not ramp up over half a minute, and P0 must be told its normal tick length straight away.
-		var speedAfterKick = new List<(long T, int Speed, int Tick0)>();
-		var (logs, s, clients) = RunWithCapacities(new[] { 2.0, 0.8, 2.0 }, 45000, 0, (t, cs, sched) =>
+		// P1 (80%) slows the game; at 30s P1 is kicked. Nobody else has been tested above 78% since, so the game
+		// does not jump to 100%: it speeds back up briskly from where it is, and is at full speed within 15s.
+		var speedAfterKick = new List<(long T, int Speed)>();
+		var (logs, s, clients) = RunWithCapacities(new[] { 2.0, 0.8, 2.0 }, 50000, 0, (t, cs, sched) =>
 		{
 			if (t == 30000)
 				sched.RemoveClient(1);
 			if (t > 30000)
-				speedAfterKick.Add((t, sched.SpeedPercent, cs[0].TickMs));
+				speedAfterKick.Add((t, sched.SpeedPercent));
 		});
 
-		Check(speedAfterKick.Count > 0 && speedAfterKick[0].Speed == 100 && speedAfterKick.All(x => x.Speed == 100),
-			$"speed is 100% from the first second after the kick ({string.Join(",", speedAfterKick.Take(5).Select(x => x.Speed))})");
-		Check(speedAfterKick.Skip(1).All(x => x.Tick0 <= 40), $"the remaining players run at normal tick length right after the kick ({string.Join(",", speedAfterKick.Take(5).Select(x => x.Tick0))})");
-		Check(logs.Any(l => l.Contains("P1 has left; the game is back to full speed")), "the snap back is logged");
+		var speeds = speedAfterKick.Select(x => x.Speed).ToList();
+		Check(speeds[0] < 100 && speeds[0] >= 78, $"the game does not jump to full speed the second after the kick ({speeds[0]}%)");
+		Check(speeds.Zip(speeds.Skip(1), (a, b) => b >= a).All(x => x), $"the speed only rises after the kick ({string.Join(",", speeds.Take(12))})");
+		Check(speedAfterKick.First(x => x.Speed == 100).T - 30000 <= 15000, $"full speed within 15s of the kick ({(speedAfterKick.First(x => x.Speed == 100).T - 30000) / 1000}s)");
+		Check(logs.Any(l => l.Contains("P1 has left; speeding the game back up")), "the ramp is logged");
+	}
+
+	static void LeavingSlowestPlayerFindsTheNextCeiling()
+	{
+		// P1 (60%) slows the game; P2 (80%) is quietly fine at that speed. When P1 leaves, the game probes up and
+		// P2's ceiling is found on the way: a brief overshoot, then a hold near 80%, never a jump to 100% that
+		// leaves P2 three seconds behind.
+		var maxP2Gap = 0;
+		var (logs, s, clients) = RunWithCapacities(new[] { 2.0, 0.6, 0.8 }, 120000, 0, (t, cs, sched) =>
+		{
+			if (t == 40000)
+				sched.RemoveClient(1);
+			if (t > 40000)
+				maxP2Gap = Math.Max(maxP2Gap, cs[0].NextFrame - cs[2].NextFrame);
+		}, maxPlayerLag: 3000);
+
+		Check(logs.Any(l => (l.StartsWith("Speeding the game up to") || l.StartsWith("Slowing the game")) && l.Contains("P2")), "P2's ceiling is found after P1 leaves");
+		Check(maxP2Gap * 120 < 2500, $"P2 never falls far behind while the game speeds up ({maxP2Gap * 120}ms at worst)");
+		Check(s.SpeedPercent >= 72 && s.SpeedPercent <= 92, $"the game settles near P2's ceiling ({s.SpeedPercent}%)");
+	}
+
+	static void FailedProbeRevertsToTheMeasuredSpeed()
+	{
+		// P1 manages 60% for 45s, then 85%. The creeping hold notices the ceiling has moved and probes; the probe
+		// fails somewhere above 85%, and the game goes back to what P1 was just measured managing, not to 60%.
+		var minSpeedAfterFailure = 100;
+		var speedBefore = 100;
+		var speedByTime = new List<(long T, int Speed)>();
+		var (logs, s, clients) = RunWithCapacities(new[] { 2.0, 0.6 }, 130000, 0, (t, cs, sched) =>
+		{
+			if (t == 45000)
+				cs[1].Capacity = 0.85;
+			speedByTime.Add((t, sched.SpeedPercent));
+		}, maxPlayerLag: 3000);
+
+		// The failure happens when the speed drops for the first time after 60s (the probe's overshoot is reverted)
+		var failedAt = speedByTime.Where(x => x.T > 60000).Zip(speedByTime.Where(x => x.T > 60000).Skip(1), (a, b) => (b.T, Drop: b.Speed < a.Speed - 3)).FirstOrDefault(x => x.Drop).T;
+		if (failedAt > 0)
+			minSpeedAfterFailure = speedByTime.Where(x => x.T >= failedAt).Min(x => x.Speed);
+
+		var failure = logs.FirstOrDefault(l => l.StartsWith("Speeding the game up to"));
+		Check(failure != null && failedAt > 0, "precondition: a probe failed after the ceiling rose: " + string.Join(" | ", logs.Where(l => !l.StartsWith("Players behind")).TakeLast(4)));
+		var backTo = failure == null ? 0 : int.Parse(failure.Split("back to ")[1].TrimEnd('.', '%'));
+		Check(backTo >= 75, $"the revert is to the measured speed, not the probe's start ({failure})");
+		Check(minSpeedAfterFailure >= 72, $"after the failure the game stays near P1's new ceiling ({minSpeedAfterFailure}% at lowest)");
+	}
+
+	static void CreepingHoldSettlesWithoutProbing()
+	{
+		// P1 manages a steady 75%. After the first slowdown the creeping hold should settle a point or two under
+		// 75% and stay there: no timed probes, no failures, no further slowdowns.
+		var speeds = new List<int>();
+		var (logs, s, clients) = RunWithCapacities(new[] { 2.0, 0.75, 2.0 }, 180000, 0, (t, cs, sched) =>
+		{
+			if (t >= 40000)
+				speeds.Add(sched.SpeedPercent);
+		}, maxPlayerLag: 3000);
+
+		Check(logs.Count(l => l.StartsWith("Slowing the game")) <= 2, $"at most two slowdowns for a steady computer ({logs.Count(l => l.StartsWith("Slowing the game"))})");
+		Check(logs.Count(l => l.StartsWith("Speeding the game up to")) <= 1, $"at most one failed probe in three minutes ({logs.Count(l => l.StartsWith("Speeding the game up to"))})");
+		Check(speeds.Min() >= 66 && speeds.Max() <= 79, $"the speed stays within a few points of the ceiling ({speeds.Min()}-{speeds.Max()}%)");
+		Check(clients[0].NextFrame - clients[1].NextFrame < 20, $"P1 stays close to the others ({(clients[0].NextFrame - clients[1].NextFrame) * 120}ms behind at the end)");
+	}
+
+	static void ProjectedLagTriggersBeforeTheBudget()
+	{
+		// P1 manages 50% at full speed: it falls behind at half a second per second. With a 3s budget the outcome
+		// is clear long before 3s, so the slowdown comes early and P1 never carries the whole budget.
+		var (logs, s, clients) = RunWithCapacities(new[] { 2.0, 0.5 }, 30000, 0, null, maxPlayerLag: 3000);
+		var first = logs.FirstOrDefault(l => l.StartsWith("Slowing the game"));
+		Check(first != null, "precondition: the game was slowed");
+		var behind = first == null ? 9f : float.Parse(first.Split(" and is ")[1].Split('s')[0], System.Globalization.CultureInfo.InvariantCulture);
+		Check(behind < 2.8f, $"the first slowdown comes before the budget is used up ({behind}s behind)");
+	}
+
+	static void VoteCommandsAreRecognised()
+	{
+		Check(SlowestPlayerVote.IsCommand("!kickslow") && SlowestPlayerVote.IsCommand("!kicklag") && SlowestPlayerVote.IsCommand("!ks"), "aliases count as the vote");
+		Check(SlowestPlayerVote.IsCommand("!kickslow lincox"), "a name after the command does not stop it counting");
+		Check(!SlowestPlayerVote.IsCommand("!kick") && SlowestPlayerVote.LooksLikeKick("!kick kali") && SlowestPlayerVote.LooksLikeKick("!kicksllow"), "other kick attempts are recognised for a hint");
+		Check(!SlowestPlayerVote.LooksLikeKick("!kickslow") && !SlowestPlayerVote.LooksLikeKick("!speed"), "the vote and other commands are not hints");
 	}
 
 	static void CapacityIsMeasuredWhileCatchingUp()
@@ -451,6 +533,9 @@ static class Tests
 		s.RemoveClient(2);
 		var summary = logs.Last(l => l.StartsWith("Summary for P2"));
 		Check(summary.Contains("froze 3 time") && !summary.Contains("dropped out"), "all three freezes are reported as freezes: " + summary);
+		s.RemoveClient(1);
+		var summary1 = logs.Last(l => l.StartsWith("Summary for P1"));
+		Check(summary1.Contains("packets were delayed 1 time") && !summary1.Contains("dropped out"), "an upload stall is reported as a delay, not a dropout: " + summary1);
 	}
 
 	static void StallsDoNotSetThePace()
@@ -532,7 +617,7 @@ static class Tests
 		var slowdowns = logs.Count(l => l.StartsWith("Slowing the game"));
 		Check(slowdowns <= 4, $"few slowdowns for a steadily slow computer ({slowdowns} in 150s)");
 		Check(speeds.Min() >= 50 && speeds.Max() <= 70, $"after settling the speed stays close to the computer's capacity ({speeds.Min()}-{speeds.Max()}%)");
-		Check(logs.Any(l => l.Contains("no faster for") || l.Contains("will not be sped up again for")), "a failed probe is held: " + (logs.FirstOrDefault(l => l.Contains("no faster for") || l.Contains("will not be sped up")) ?? "(no hold)"));
+		Check(logs.Count(l => l.StartsWith("Speeding the game up to")) <= 2, $"probes against a steady ceiling are rare ({logs.Count(l => l.StartsWith("Speeding the game up to"))} failed in 150s)");
 	}
 
 	static void RecoveryAcceleratesWhenTheLoadPasses()
@@ -549,7 +634,7 @@ static class Tests
 		});
 
 		Check(logs.Any(l => l.StartsWith("Slowing the game")), "precondition: the game was slowed");
-		Check(backAt > 0 && backAt - 25000 <= 50000, $"back to full speed within 50s of the load passing ({(backAt - 25000) / 1000}s)");
+		Check(backAt > 0 && backAt - 25000 <= 60000, $"back to full speed within 60s of the load passing ({(backAt - 25000) / 1000}s)");
 	}
 
 	static void FloorLeavesBehindAndTurboBringsBack()
@@ -699,7 +784,12 @@ static class Tests
 		DefeatedPlayerNoLongerBlocks();
 		FarBehindSpectatorIsStillToldToCatchUp();
 		SlowestPlayerIsIdentifiedAndCleared();
-		KickedSlowestPlayerRestoresFullSpeedAtOnce();
+		KickedSlowestPlayerSpeedsBackUp();
+		LeavingSlowestPlayerFindsTheNextCeiling();
+		FailedProbeRevertsToTheMeasuredSpeed();
+		CreepingHoldSettlesWithoutProbing();
+		ProjectedLagTriggersBeforeTheBudget();
+		VoteCommandsAreRecognised();
 		CapacityIsMeasuredWhileCatchingUp();
 		DownloadHoleBecomesBuffer();
 		UploadStallAndFreezeDoNotKeepABuffer();

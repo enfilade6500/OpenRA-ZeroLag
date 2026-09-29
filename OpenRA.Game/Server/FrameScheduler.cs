@@ -138,20 +138,44 @@ namespace OpenRA.Server
 		const float PaceSanityLimit = 10f;
 		const float PaceHeadroom = 0.97f;
 
-		// Speeding back up: the game speed is raised by ProbeRate points per second at first, doubling every
-		// ProbeDoublingTime (ms) while everyone keeps up, up to MaxProbeRate. A slowdown while probing is a failed
-		// probe: the next probe waits MinHold (ms), doubling per failure up to MaxHold. The first slowdown for a
-		// player is never held: it may have been a passing load.
+		// After a slowdown the game is held near the ceiling that was measured: the speed creeps up by CreepRate
+		// points per second while the player it was slowed down for keeps up, and is pulled back by CreepGain points
+		// per second for every second they are behind beyond CreepDeadband (ms), moving at most CreepRampLimit
+		// points per second either way and never more than CreepFloor below the measured ceiling. The creep is a
+		// continuous, imperceptible probe and the pull-back is its answer: a computer at a steady ceiling settles a
+		// point or two under it with no further speed changes at all. Once that player has shown no resistance for
+		// CreepFreeIntervals control intervals with the speed CreepAboveCeiling percent above the measured ceiling
+		// (a measurement is a few percent off either way; the creep settles that on its own), their ceiling has
+		// moved up and a real probe starts. Resistance is being more than twice the deadband behind (which resets
+		// the count); intervals in between, and intervals around a connection hole, say nothing about the computer
+		// and count neither way, so the ordinary jitter of a client's lateness does not keep a hold going forever.
+		const float CreepRate = 0.3f;
+		const float CreepGain = 5f;
+		const int CreepDeadband = 100;
+		const float CreepRampLimit = 1f;
+		const float CreepFloor = 0.06f;
+		const int CreepFreeIntervals = 15;
+		const int CreepAboveCeiling = 3;
+
+		// Probing back towards full speed: the speed is raised by ProbeRate points per second at first, doubling
+		// every ProbeDoublingTime (ms) while everyone keeps up, up to MaxProbeRate. When the player the game was
+		// slowed down for leaves, the probe starts at LeaveProbeRate instead (the others were never tested above
+		// the old speed, so the game does not jump).
 		const float ProbeRate = 0.5f;
 		const float MaxProbeRate = 4f;
 		const int ProbeDoublingTime = 10000;
-		const int MinHold = 30000;
-		const int MaxHold = 120000;
+		const float LeaveProbeRate = 2f;
 
 		// A probe has failed when a player has been falling further behind for FallingBehindIntervalsBeforePaceChange
 		// intervals and is at least this many frame periods behind: enough to tell a computer at its ceiling from the
-		// small, corrected lag every client picks up while the frame period shrinks.
+		// small, corrected lag every client picks up while the frame period shrinks. The game then goes back to the
+		// speed that player was measured managing (never below where the probe started), and the creeping hold resumes.
 		const int ProbeFailureLateness = 3;
+
+		// A player is slowed down for once they are more than the lag budget behind, or once they are more than
+		// ReportBehindThreshold behind and falling behind fast enough to pass the budget within this long (ms):
+		// waiting out the whole budget when the outcome is already clear only costs everyone more catching up.
+		const int TriggerHorizon = 10000;
 
 		// The floor (Server.MinGameSpeed) leaves a player behind to protect the others; with fewer players than this
 		// there is no majority to protect, and leaving one behind ends the game for everyone. A two-player game
@@ -202,6 +226,7 @@ namespace OpenRA.Server
 			public int FallingBehindIntervals;
 			public int BehindIntervals;
 			public readonly Queue<(long Time, int Frame)> Progress = new();
+			public readonly Queue<long> RecentBehind = new();
 			public bool IsSpectator;
 			public bool IsDefeated;
 			public bool IsTooSlow;
@@ -243,10 +268,12 @@ namespace OpenRA.Server
 			public readonly Queue<(long End, long Length, HoleKind Kind)> Holes = new();
 			public long LastHoleReport = -1;
 
-			// Summary of the connection
+			// Summary of the connection: dropouts stopped the client's game, delays only held up its packets
 			public int Dropouts;
 			public long DropoutMs;
 			public long LongestDropout;
+			public int Delays;
+			public long DelayMs;
 			public int Freezes;
 			public long FreezeMs;
 
@@ -310,6 +337,7 @@ namespace OpenRA.Server
 		long blockedSince;
 		readonly HashSet<int> waitedFor = new();
 		long lastResumeTime = -1;
+		bool waitLogged;
 		string blockedBy;
 		int shortWaits;
 		long shortWaitMs;
@@ -319,9 +347,12 @@ namespace OpenRA.Server
 		float probeRate;
 		long probeSince;
 		float probeStartPace = 1f;
-		long holdUntil;
-		int holdMs;
+
+		// The creeping hold: the player the game is held for, the speed their computer was measured managing
+		// (fraction of normal), and since when they have shown no resistance at that speed (-1: they have)
 		int holdFor = -1;
+		float ceilingSpeed = 1f;
+		int freeIntervals;
 
 		/// <summary>The current game speed as a percentage of normal (100 when the game is not slowed down).</summary>
 		public int SpeedPercent => (int)Math.Round(100 / pace);
@@ -478,14 +509,33 @@ namespace OpenRA.Server
 				state.LastFreezeTime = now;
 				if (state.BufferMode == BufferMode.Auto)
 				{
+					// The recent dropouts of about that buffer's length were most likely freezes too (the buffer was built
+					// from them, and it did not help); a much longer one, such as a dead connection, stays what it was
+					var reclassified = 0;
+					var remaining = new Queue<(long End, long Length, HoleKind Kind)>();
+					foreach (var h in state.Holes)
+					{
+						if (h.Kind == HoleKind.Connection && h.Length <= 2 * state.TargetSlack)
+						{
+							reclassified++;
+							state.Dropouts--;
+							state.DropoutMs -= h.Length;
+							state.Freezes++;
+							state.FreezeMs += h.Length;
+							remaining.Enqueue((h.End, h.Length, HoleKind.Freeze));
+						}
+						else
+							remaining.Enqueue(h);
+					}
+
+					state.Holes.Clear();
+					foreach (var h in remaining)
+						state.Holes.Enqueue(h);
+					state.LongestDropout = state.Holes.Where(h => h.Kind == HoleKind.Connection).Select(h => h.Length).DefaultIfEmpty(0).Max();
+
 					log($"{describeClient(index)}'s game froze for {stopped / 1000f:F1}s with {state.TargetSlack / 1000f:F1}s buffered: " +
-						"the earlier dropouts were freezes too, so the buffer is not helping them; back to the normal buffer.");
+						$"the buffer is not helping them ({reclassified} earlier dropout(s) were freezes too); back to the normal buffer.");
 					state.TargetSlack = BaseSlack;
-					state.Freezes += state.Dropouts;
-					state.FreezeMs += state.DropoutMs;
-					state.Dropouts = 0;
-					state.DropoutMs = 0;
-					state.LongestDropout = 0;
 				}
 			}
 
@@ -493,16 +543,21 @@ namespace OpenRA.Server
 			while (state.Holes.Count > 0 && state.Holes.Peek().End < now - HoleMemory)
 				state.Holes.Dequeue();
 
-			if (kind == HoleKind.Freeze)
+			switch (kind)
 			{
-				state.Freezes++;
-				state.FreezeMs += length;
-			}
-			else
-			{
-				state.Dropouts++;
-				state.DropoutMs += length;
-				state.LongestDropout = Math.Max(state.LongestDropout, length);
+				case HoleKind.Freeze:
+					state.Freezes++;
+					state.FreezeMs += length;
+					break;
+				case HoleKind.Upload:
+					state.Delays++;
+					state.DelayMs += length;
+					break;
+				default:
+					state.Dropouts++;
+					state.DropoutMs += length;
+					state.LongestDropout = Math.Max(state.LongestDropout, length);
+					break;
 			}
 
 			// The lateness samples taken across the hole do not describe a steady state: a burst makes the client look
@@ -601,32 +656,51 @@ namespace OpenRA.Server
 
 			state.IsDefeated = true;
 			log($"{describeClient(client)} has been defeated; the game will no longer wait for them.");
-			if (client == slowestClient)
-				RestoreFullSpeed($"{describeClient(client)} has been defeated");
+			if (client == slowestClient || client == holdFor)
+				SpeedBackUp($"{describeClient(client)} has been defeated");
 		}
 
-		// The player the game was slowed down for is no longer playing: there is nothing left to ramp back up
-		// for, so return to full speed at once (players expect to see the effect immediately after a kick).
-		// If someone else cannot keep up either, the game is slowed down for them again within a few seconds.
-		void RestoreFullSpeed(string reason)
+		// The player the game was slowed down for is no longer playing. Nobody else has been tested above the
+		// current speed since the slowdown began (when one computer struggles with a big battle, others are usually
+		// close behind), so rather than jumping to full speed and finding out the hard way, probe up from here,
+		// briskly: players expect to see the effect of a kick. Whoever cannot keep up is found on the way.
+		void SpeedBackUp(string reason)
 		{
 			slowestClient = -1;
+			holdFor = -1;
+			freeIntervals = 0;
 			if (pace <= 1f)
 				return;
 
-			pace = 1f;
-			probeRate = 0;
-			holdMs = 0;
-			holdUntil = 0;
+			StartProbe(LeaveProbeRate);
 			foreach (var state in clients.Values)
 			{
 				state.FallingBehindIntervals = 0;
 				state.BehindIntervals = 0;
 			}
 
-			// Tell every client its new tick length straight away rather than at the next interval
+			// Take the first step straight away rather than at the next interval
 			nextControlUpdate = 0;
-			log($"{reason}; the game is back to full speed.");
+			log($"{reason}; speeding the game back up.");
+		}
+
+		// Begin raising the speed from where it is, at the given rate (points per second), doubling from there.
+		// The doubling clock is anchored at the next control update (see probeSince).
+		void StartProbe(float initialRate)
+		{
+			probeRate = initialRate;
+			probeSince = -1;
+			probeStartPace = pace;
+			freeIntervals = 0;
+		}
+
+		// Points per second the running probe should add now
+		float CurrentProbeRate(long now)
+		{
+			if (probeSince < 0)
+				probeSince = now - (long)(ProbeDoublingTime * Math.Log2(Math.Max(1f, probeRate / ProbeRate)));
+
+			return Math.Min(MaxProbeRate, ProbeRate * (float)Math.Pow(2, (now - probeSince) / (double)ProbeDoublingTime));
 		}
 
 		public void RemoveClient(int client)
@@ -635,13 +709,19 @@ namespace OpenRA.Server
 			{
 				var avg = state.BehindSamples > 0 ? state.SumBehind / state.BehindSamples : 0;
 				var computer = state.SlowestSpeed > 0 ? $" Their computer managed {state.SlowestSpeed * 100:F0}% while it was slowing the game" : "";
-				if (state.PeakSpeed > 0)
+
+				// The best rate seen is a lower bound that says nothing unless it is high, or unless this player slowed the game
+				if (state.PeakSpeed > 0 && (state.PeakSpeed >= 1 || state.SlowestSpeed > 0))
 					computer += (computer.Length > 0 ? ", and" : " Their computer managed") + $" at least {state.PeakSpeed * 100:F0}% at best";
 
-				var connection = state.Dropouts > 0
-					? $" Their connection dropped out {state.Dropouts} time(s), {state.DropoutMs / 1000f:F1}s in total, longest {state.LongestDropout / 1000f:F1}s"
-						+ (state.BufferPeak > BaseSlack ? $"; buffered up to {state.BufferPeak / 1000f:F1}s for them" : "") + "."
-					: "";
+				var connection = "";
+				if (state.Dropouts > 0)
+					connection += $" Their connection dropped out {state.Dropouts} time(s), {state.DropoutMs / 1000f:F1}s in total, " +
+						$"longest {state.LongestDropout / 1000f:F1}s" + (state.BufferPeak > BaseSlack ? $"; buffered up to {state.BufferPeak / 1000f:F1}s for them" : "") + ".";
+				else if (state.BufferPeak > BaseSlack)
+					connection += $" Buffered up to {state.BufferPeak / 1000f:F1}s for them.";
+				if (state.Delays > 0)
+					connection += $" Their packets were delayed {state.Delays} time(s), {state.DelayMs / 1000f:F1}s in total (their game kept running).";
 				if (state.Freezes > 0)
 					connection += $" Their game froze {state.Freezes} time(s), {state.FreezeMs / 1000f:F1}s in total.";
 
@@ -649,8 +729,8 @@ namespace OpenRA.Server
 					$"average {avg / 1000f:F2}s; caused {state.SlowdownsCaused} slowdown(s)." + (computer.Length > 0 ? computer + "." : "") + connection);
 			}
 
-			if (client == slowestClient)
-				RestoreFullSpeed($"{describeClient(client)} has left");
+			if (client == slowestClient || client == holdFor)
+				SpeedBackUp($"{describeClient(client)} has left");
 
 			clients.Remove(client);
 		}
@@ -735,10 +815,15 @@ namespace OpenRA.Server
 					blockedSince = now;
 					blockedBy = string.Join(", ", waitingFor.Select(describeClient));
 					waitedFor.UnionWith(waitingFor);
+					waitLogged = false;
+				}
 
-					// Don't log the start of every wait in a rapid sequence; they are reported in aggregate
-					if (lastResumeTime < 0 || now - lastResumeTime > 1000)
-						log($"Everyone is waiting for {blockedBy}, who has stopped responding.");
+				// A wait is logged once it has lasted long enough to be worth a line (shorter ones are counted and
+				// reported in aggregate), and not for every wait in a rapid sequence
+				if (!waitLogged && now - blockedSince >= LoggedWaitThreshold && (lastResumeTime < 0 || blockedSince - lastResumeTime > 1000))
+				{
+					waitLogged = true;
+					log($"Everyone is waiting for {blockedBy}, who has stopped responding.");
 				}
 
 				return false;
@@ -831,15 +916,23 @@ namespace OpenRA.Server
 				behind[index] = b;
 				state.SlackSamples.Clear();
 
-				// Summary stats (only count real lateness, not being ahead of schedule)
+				// Summary stats (only count real lateness, not being ahead of schedule, and only while the client is
+				// still playing: a defeated player or spectator who falls behind is not held against them)
 				state.Seen = true;
-				if (b > 0)
+				if (!state.ExemptFromPacing)
 				{
-					state.MaxBehind = Math.Max(state.MaxBehind, b);
-					state.SumBehind += b;
+					if (b > 0)
+					{
+						state.MaxBehind = Math.Max(state.MaxBehind, b);
+						state.SumBehind += b;
+					}
+
+					state.BehindSamples++;
 				}
 
-				state.BehindSamples++;
+				state.RecentBehind.Enqueue(b);
+				while (state.RecentBehind.Count > FallingBehindIntervalsBeforePaceChange + 1)
+					state.RecentBehind.Dequeue();
 
 				// A client the game stopped waiting for is waited for again once it has caught up
 				state.WasWithinBudget = b <= lagBudget;
@@ -902,27 +995,36 @@ namespace OpenRA.Server
 			var cannotKeepUp = false;
 			var oldPace = pace;
 
-			// A probe has failed as soon as a player starts falling behind while it runs: go back to the speed the
-			// probe started from, where everyone was keeping up, without waiting for them to use up their whole lag
-			// budget (which would take the game ten points past their ceiling and them back to a three-second backlog)
+			// A probe has failed as soon as a player starts falling behind while it runs, without waiting for them to
+			// use up their whole lag budget (which would take the game ten points past their ceiling and them back to
+			// a three-second backlog). The game goes back to the speed that player was measured managing while they
+			// fell behind, which is their ceiling as of now (never below where the probe started, where everyone was
+			// keeping up), and is held there.
 			if (probeRate > 0)
 			{
 				var failing = behind.Where(b => !clients[b.Key].ExemptFromPacing && b.Value > ProbeFailureLateness * nominalPeriod
 					&& clients[b.Key].FallingBehindIntervals >= FallingBehindIntervalsBeforePaceChange).Select(b => b.Key).ToList();
 				if (failing.Count > 0)
 				{
-					holdMs = Math.Min(MaxHold, Math.Max(MinHold, holdMs * 2));
-					holdUntil = now + holdMs;
-					holdFor = failing[0];
-					probeRate = 0;
+					var index = failing[0];
+					var state = clients[index];
 					var from = 100 / pace;
-					pace = Math.Max(pace, probeStartPace);
-					clients[failing[0]].SlowdownsCaused++;
-					foreach (var index in failing)
-						clients[index].FallingBehindIntervals = clients[index].BehindIntervals = 0;
+					var revert = probeStartPace;
+					var rate = MeasuredRate(state, now, out _);
+					if (rate > 0)
+					{
+						var needed = (float)(1 / (nominalPeriod * PaceHeadroom * rate));
+						revert = Math.Min(probeStartPace, Math.Max(pace, needed));
+					}
 
-					log($"Speeding the game up to {from:F0}% was too much for {describeClient(failing[0])} ({behind[failing[0]] / 1000f:F1}s behind and falling further); " +
-						$"back to {100 / pace:F0}%, and no faster for {holdMs / 1000}s.");
+					pace = revert;
+					HoldFor(index, rate > 0 ? (float)(rate * nominalPeriod) : 1 / (pace * PaceHeadroom));
+					state.SlowdownsCaused++;
+					foreach (var f in failing)
+						clients[f].FallingBehindIntervals = clients[f].BehindIntervals = 0;
+
+					log($"Speeding the game up to {from:F0}% was too much for {describeClient(index)} ({behind[index] / 1000f:F1}s behind and falling further); " +
+						$"back to {100 / pace:F0}%.");
 					cannotKeepUp = true;
 				}
 			}
@@ -930,7 +1032,7 @@ namespace OpenRA.Server
 			foreach (var (index, b) in behind)
 			{
 				var state = clients[index];
-				if (state.ExemptFromPacing || b <= lagBudget)
+				if (state.ExemptFromPacing || !OverBudget(state, b))
 					continue;
 
 				if (state.FallingBehindIntervals < FallingBehindIntervalsBeforePaceChange && state.BehindIntervals < BehindIntervalsBeforePaceChange)
@@ -941,13 +1043,7 @@ namespace OpenRA.Server
 				// connection dropped out, or its game froze) is taken out first: a stall is not a rate, and
 				// slowing everyone to the average of "nothing" and "flat out" helps nobody. Only the rate the
 				// client sustains between holes can slow the game.
-				var (startTime, startFrame) = state.Progress.Peek();
-				var elapsed = Math.Max(1, now - startTime);
-				var holeMs = state.Holes.Where(h => h.End > startTime).Sum(h => Math.Min(h.Length, h.End - startTime));
-				if (state.OpenHoleStart >= 0)
-					holeMs += Math.Min(state.OpenHoleEnd - state.OpenHoleStart, state.OpenHoleEnd - startTime);
-
-				var framesPerMs = (double)(state.LastReportedFrame - startFrame) / Math.Max(1, elapsed - holeMs);
+				var framesPerMs = MeasuredRate(state, now, out var holeMs);
 				if (holeMs > 0 && framesPerMs * nominalPeriod * PaceHeadroom >= 1 / pace)
 				{
 					// Between the holes this client keeps up with the game as it is: the deficit is theirs to catch up
@@ -956,10 +1052,11 @@ namespace OpenRA.Server
 					if (state.LastHoleReport < 0 || now - state.LastHoleReport > HoleReportInterval)
 					{
 						state.LastHoleReport = now;
+						var startTime = state.Progress.Peek().Time;
 						var recent = state.Holes.Where(h => h.End > startTime).ToList();
 						var cause = recent.Where(h => h.Kind == HoleKind.Freeze).Sum(h => h.Length) > recent.Where(h => h.Kind != HoleKind.Freeze).Sum(h => h.Length)
 							? "freezes" : "connection dropouts";
-						log($"{describeClient(index)} is {b / 1000f:F1}s behind because of {cause} ({holeMs / 1000f:F1}s in the last {elapsed / 1000f:F0}s), " +
+						log($"{describeClient(index)} is {b / 1000f:F1}s behind because of {cause} ({holeMs / 1000f:F1}s in the last {(now - startTime) / 1000f:F0}s), " +
 							"not their computer; the game is not slowed down for them.");
 					}
 
@@ -985,33 +1082,17 @@ namespace OpenRA.Server
 					var managed = framesPerMs * nominalPeriod;
 					if (needed > pace + 0.005f)
 					{
-						// A slowdown while the game was being sped back up is a failed probe: this computer's ceiling is
-						// where it was, so wait longer before trying again. The first slowdown for a player is not held.
-						var hold = "";
-						if (holdFor != index)
-						{
-							holdFor = index;
-							holdMs = 0;
-						}
-						else if (probeRate > 0)
-						{
-							holdMs = Math.Min(MaxHold, Math.Max(MinHold, holdMs * 2));
-							hold = $" The game will not be sped up again for {holdMs / 1000}s.";
-						}
-
-						holdUntil = now + holdMs;
-						probeRate = 0;
 						log($"Slowing the game to {100 / needed:F0}% of normal speed so that {describeClient(index)} can keep up " +
-							$"(their computer is managing {managed * 100:F0}% and is {b / 1000f:F1}s behind).{hold}");
+							$"(their computer is managing {managed * 100:F0}% and is {b / 1000f:F1}s behind).");
 						state.SlowdownsCaused++;
 					}
 
-					// This player needs the game at least as slow as it is, so they are the one it is slowed down for
+					// This player needs the game at least as slow as it is, so they are the one it is slowed down for,
+					// and held for from now on
 					if (needed > 1.005f && needed >= pace - 0.005f)
 					{
-						slowestClient = index;
-						slowestClientSpeed = managed;
 						state.SlowestSpeed = state.SlowestSpeed > 0 ? Math.Min(state.SlowestSpeed, managed) : managed;
+						HoldFor(index, (float)managed);
 					}
 
 					pace = Math.Max(pace, needed);
@@ -1022,35 +1103,70 @@ namespace OpenRA.Server
 				cannotKeepUp = true;
 			}
 
-			// Probe back towards full speed once every client is keeping up (a client that sent nothing
-			// this interval may be stuck, so wait until it reports again), unless a recent probe failed.
-			// Only start speeding back up once everyone is comfortably inside the lag budget, not right at its
-			// edge, so that the game does not alternate between slowing down and speeding up.
-			// The probe starts gently and accelerates while it succeeds: a computer at a hard ceiling is found
-			// out within a few points of it, while a computer whose load has passed gets the game back to full
-			// speed in well under a minute.
+			// Below full speed and nobody newly behind: either probing back up, or holding near the measured ceiling
 			var playerBehind = behind.Where(b => !clients[b.Key].ExemptFromPacing).Select(b => b.Value).ToList();
 			var recoveryThreshold = Math.Max(nominalPeriod, lagBudget / 2);
-			if (!cannotKeepUp && pace > 1f && now >= holdUntil && playerBehind.Count == clients.Values.Count(c => !c.ExemptFromPacing)
-				&& playerBehind.All(b => b <= recoveryThreshold))
+			if (!cannotKeepUp && pace > 1f)
 			{
-				if (probeRate <= 0)
+				if (probeRate > 0)
 				{
-					probeRate = ProbeRate;
-					probeSince = now;
-					probeStartPace = pace;
+					// Raise the speed while everyone is comfortably inside the lag budget, not right at its edge (a client
+					// that sent nothing this interval may be stuck, so wait until it reports again). The probe starts
+					// gently and accelerates while it succeeds: a computer at a hard ceiling is found out within a few
+					// points of it, while a computer whose load has passed gets the game back to full speed in well
+					// under a minute.
+					if (playerBehind.Count == clients.Values.Count(c => !c.ExemptFromPacing) && playerBehind.All(b => b <= recoveryThreshold))
+					{
+						probeRate = CurrentProbeRate(now);
+						pace = Math.Max(1f, 1 / (1 / pace + probeRate / 100f));
+					}
+				}
+				else if (holdFor >= 0 && clients.TryGetValue(holdFor, out var held) && !held.ExemptFromPacing)
+				{
+					if (behind.TryGetValue(holdFor, out var hb))
+					{
+						// The creeping hold (see CreepRate): up a little while the held player keeps up, back in proportion
+						// to how far behind they are, never far below the ceiling that was measured for them
+						var speed = 100 / pace;
+						var delta = (CreepRate - CreepGain * Math.Max(0, hb - CreepDeadband) / 1000f).Clamp(-CreepRampLimit, CreepRampLimit);
+						var floor = Math.Min(speed, 100 * ceilingSpeed * (1 - CreepFloor));
+						speed = Math.Min(100f, Math.Max(speed + delta, floor));
+						pace = 100 / speed;
+
+						// No resistance at the measured ceiling for long enough means the ceiling has moved up: probe
+						var atCeiling = speed >= (100 + CreepAboveCeiling) * ceilingSpeed;
+						var recentHole = held.OpenHoleStart >= 0 || held.Holes.Any(h => h.End > now - FallingBehindIntervalsBeforePaceChange * Interval);
+						if (recentHole)
+						{
+							// Says nothing about the computer
+						}
+						else if (hb > 2 * CreepDeadband)
+							freeIntervals = 0;
+						else if (hb < CreepDeadband && atCeiling)
+							freeIntervals++;
+
+						if (pace > 1f && freeIntervals >= CreepFreeIntervals)
+						{
+							log($"{describeClient(holdFor)} has kept up at {speed:F0}% for {freeIntervals}s; probing for more speed.");
+							StartProbe(ProbeRate);
+						}
+					}
 				}
 				else
-					probeRate = Math.Min(MaxProbeRate, ProbeRate * (float)Math.Pow(2, (now - probeSince) / ProbeDoublingTime));
-
-				pace = Math.Max(1f, 1 / (1 / pace + probeRate / 100f));
-				if (pace == 1f && oldPace > 1f)
 				{
-					slowestClient = -1;
-					probeRate = 0;
-					holdMs = 0;
-					log("The game is back to full speed.");
+					// Slowed down with nobody left to hold for: find out what the others can do
+					holdFor = -1;
+					StartProbe(ProbeRate);
 				}
+			}
+
+			if (pace == 1f && oldPace > 1f)
+			{
+				slowestClient = -1;
+				holdFor = -1;
+				probeRate = 0;
+				freeIntervals = 0;
+				log("The game is back to full speed.");
 			}
 
 			// Periodically list players who are falling behind, so problems can be traced to a player
@@ -1109,6 +1225,44 @@ namespace OpenRA.Server
 			}
 
 			return result;
+		}
+
+		// The rate (frames per ms) a client has managed over its progress window, with the time it spent in holes
+		// taken out (returned in holeMs). 0 if nothing is known yet.
+		double MeasuredRate(ClientState state, long now, out long holeMs)
+		{
+			var (startTime, startFrame) = state.Progress.Peek();
+			var elapsed = Math.Max(1, now - startTime);
+			holeMs = state.Holes.Where(h => h.End > startTime).Sum(h => Math.Min(h.Length, h.End - startTime));
+			if (state.OpenHoleStart >= 0)
+				holeMs += Math.Min(state.OpenHoleEnd - state.OpenHoleStart, state.OpenHoleEnd - startTime);
+
+			return (double)(state.LastReportedFrame - startFrame) / Math.Max(1, elapsed - holeMs);
+		}
+
+		// Whether a client's lateness (ms) calls for slowing the game: past the budget, or past ReportBehindThreshold
+		// and on course to pass the budget within TriggerHorizon at the rate it has been growing
+		bool OverBudget(ClientState state, long b)
+		{
+			if (b > lagBudget)
+				return true;
+
+			if (b <= ReportBehindThreshold || state.FallingBehindIntervals < FallingBehindIntervalsBeforePaceChange || state.RecentBehind.Count < 2)
+				return false;
+
+			var slopePerInterval = (double)(b - state.RecentBehind.Peek()) / (state.RecentBehind.Count - 1);
+			return b + slopePerInterval * TriggerHorizon / Interval > lagBudget;
+		}
+
+		// Hold the game for this client, whose computer was just measured managing the given fraction of normal speed
+		void HoldFor(int client, float measuredSpeed)
+		{
+			holdFor = client;
+			slowestClient = client;
+			slowestClientSpeed = measuredSpeed;
+			ceilingSpeed = measuredSpeed;
+			probeRate = 0;
+			freeIntervals = 0;
 		}
 
 		// The shortest tick (ms) for a requested speed-up, never faster than the host's cap nor slower than the

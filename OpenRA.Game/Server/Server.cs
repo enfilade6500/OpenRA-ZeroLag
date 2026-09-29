@@ -1116,13 +1116,20 @@ namespace OpenRA.Server
 				return true;
 			}
 
-			if (command == SlowestPlayerVote.Command)
+			if (SlowestPlayerVote.IsCommand(command))
 			{
 				if (slowestPlayerVote == null)
 					SendOrderTo(conn, "Message", "Voting to kick the slowest player is not enabled on this server.");
 				else
 					slowestPlayerVote.Vote(conn, Game.RunTime, frameScheduler.SlowestPlayer?.Client);
 
+				return true;
+			}
+
+			if (slowestPlayerVote != null && SlowestPlayerVote.LooksLikeKick(command))
+			{
+				// "!kick", "!kick name", "!kicksllow": point them at the one command that does something in a running game
+				SendOrderTo(conn, "Message", $"To vote to kick the player the game is being slowed down for, type {SlowestPlayerVote.Command}.");
 				return true;
 			}
 

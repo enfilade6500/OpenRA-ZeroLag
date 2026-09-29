@@ -1229,7 +1229,7 @@ namespace OpenRA.Server
 
 		// The rate (frames per ms) a client has managed over its progress window, with the time it spent in holes
 		// taken out (returned in holeMs). 0 if nothing is known yet.
-		double MeasuredRate(ClientState state, long now, out long holeMs)
+		static double MeasuredRate(ClientState state, long now, out long holeMs)
 		{
 			var (startTime, startFrame) = state.Progress.Peek();
 			var elapsed = Math.Max(1, now - startTime);

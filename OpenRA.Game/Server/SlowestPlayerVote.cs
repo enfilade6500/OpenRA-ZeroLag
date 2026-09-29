@@ -34,11 +34,11 @@ namespace OpenRA.Server
 
 		public const string Command = "!kickslow";
 
-		// Typos and guesses seen in the wild count as the command too
-		static readonly string[] Aliases = { "!kickslow", "!kicklag", "!kickslowest", "!kickslower", "!ks" };
-
 		// How long the game may run at full speed, or be slowed down for nobody, before the votes are cleared (ms)
 		const int TargetGrace = 120000;
+
+		// Typos and guesses seen in the wild count as the command too
+		static readonly string[] Aliases = { "!kickslow", "!kicklag", "!kickslowest", "!kickslower", "!ks" };
 
 		readonly Server server;
 		readonly HashSet<int> votes = new();

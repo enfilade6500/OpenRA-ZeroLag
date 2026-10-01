@@ -35,6 +35,13 @@ namespace NetHarness
 		/// </summary>
 		public string Schedule;
 
+		/// <summary>
+		/// Milliseconds each game packet from the server sits in this client before the game sees it, while pings are
+		/// answered at once: a client whose lateness, as the server measures it, reads this much higher than its real
+		/// backlog (a round trip the ping does not show). The hold must not mistake it for a backlog.
+		/// </summary>
+		public double ReceiveDelayMs = 0;
+
 		(double T, double Ms)[] points;
 
 		public double CostAt(double gameSeconds)
@@ -145,6 +152,7 @@ namespace NetHarness
 		readonly int expectedClients;
 		readonly double ordersPerSecond;
 		readonly ConcurrentQueue<(int FromClient, byte[] Data)> receivedPackets = new();
+		readonly Queue<(double Due, (int FromClient, byte[] Data) Packet)> delayedPackets = new();
 
 		Socket socket;
 		NetworkStream stream;
@@ -504,12 +512,33 @@ namespace NetHarness
 
 		int OrderQueueLength => pendingOrders.Count > 0 ? pendingOrders.Min(q => q.Value.Count) : 0;
 
+		bool TryTakeDelayed(out (int FromClient, byte[] Data) packet)
+		{
+			if (delayedPackets.Count > 0 && delayedPackets.Peek().Due <= Clock.Now)
+			{
+				packet = delayedPackets.Dequeue().Packet;
+				return true;
+			}
+
+			packet = default;
+			return false;
+		}
+
 		// NetworkConnection.Receive + UnitOrders (lobby subset)
 		void Receive()
 		{
 			var lost = connectionLost;
-			while (receivedPackets.TryDequeue(out var p))
+			while (true)
 			{
+				var fromDelayed = false;
+				if (!receivedPackets.TryDequeue(out var p))
+				{
+					if (!TryTakeDelayed(out p))
+						break;
+
+					fromDelayed = true;
+				}
+
 				if (OrderIO.TryParseDisconnect(p, out var disconnect))
 				{
 					if (GameStarted && pendingOrders.TryGetValue(disconnect.ClientId, out var q))
@@ -534,6 +563,11 @@ namespace NetHarness
 						Metrics.QueueSamples.Add((Clock.Now, ql));
 
 					Send(OrderIO.SerializePingResponse(timestamp, (byte)ql));
+				}
+				else if (cpu.ReceiveDelayMs > 0 && !fromDelayed)
+				{
+					// Everything but pings waits ReceiveDelayMs before the game sees it (see CpuSpec.ReceiveDelayMs)
+					delayedPackets.Enqueue((Clock.Now + cpu.ReceiveDelayMs, p));
 				}
 				else if (OrderIO.TryParseAck(p, out var ackFrame, out var ackCount))
 				{

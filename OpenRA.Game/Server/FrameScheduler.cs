@@ -138,24 +138,35 @@ namespace OpenRA.Server
 		const float PaceSanityLimit = 10f;
 		const float PaceHeadroom = 0.97f;
 
-		// After a slowdown the game is held near the ceiling that was measured: the speed creeps up by CreepRate
-		// points per second while the player it was slowed down for keeps up, and is pulled back by CreepGain points
-		// per second for every second they are behind beyond CreepDeadband (ms), moving at most CreepRampLimit
-		// points per second either way and never more than CreepFloor below the measured ceiling. The creep is a
-		// continuous, imperceptible probe and the pull-back is its answer: a computer at a steady ceiling settles a
-		// point or two under it with no further speed changes at all. Once that player has shown no resistance for
-		// CreepFreeIntervals control intervals with the speed CreepAboveCeiling percent above the measured ceiling
-		// (a measurement is a few percent off either way; the creep settles that on its own), their ceiling has
-		// moved up and a real probe starts. Resistance is being more than twice the deadband behind (which resets
-		// the count); intervals in between, and intervals around a connection hole, say nothing about the computer
-		// and count neither way, so the ordinary jitter of a client's lateness does not keep a hold going forever.
+		// After a slowdown the game is held near the ceiling that was measured, and the hold reads the player's
+		// backlog in net frames: how many frames the server has closed beyond the last one they reported, less the
+		// fewest ever seen for them (the frames always in flight on their connection), so that a constant in the
+		// lateness measure, such as an underestimated round trip, cannot pass for a backlog. The speed creeps up by
+		// CreepRate points per second while the backlog is at most CreepBacklog frames and the player's deficit (the
+		// backlog's growth as a fraction of the frames the server closes) is within CreepDeficitDeadband, or the growth
+		// within CreepGrowthFloor frames per second (the lag is sampled to the frame, so a frame of jitter is not
+		// growth, whatever the pace); a larger deficit pulls the speed back by CreepDeficitGain times the deficit
+		// beyond that, as a share of the speed, per second, and a backlog beyond CreepPullBacklog frames by
+		// CreepLevelGain points per second per frame, moving at most CreepRampLimit points per second either way and
+		// never more than CreepFloor below the measured ceiling. (With a lag budget smaller than the usual three
+		// seconds the backlog thresholds shrink with it.) The creep is a continuous, imperceptible probe and the pull-back is
+		// its answer: a computer at a steady ceiling settles a point or two under it with no further speed changes.
+		// Once that player has kept up (backlog small, deficit within the deadband) for CreepFreeIntervals control intervals with
+		// the speed CreepAboveCeiling percent above the measured ceiling (a measurement is a few percent off either
+		// way; the creep settles that on its own), their ceiling has moved up and a real probe starts. A growing or
+		// large backlog resets the count; intervals around a connection hole say nothing about the computer and
+		// count neither way.
 		const float CreepRate = 0.3f;
-		const float CreepGain = 5f;
-		const int CreepDeadband = 100;
 		const float CreepRampLimit = 1f;
 		const float CreepFloor = 0.06f;
 		const int CreepFreeIntervals = 15;
 		const int CreepAboveCeiling = 3;
+		const int CreepBacklog = 2;
+		const int CreepPullBacklog = 4;
+		const float CreepDeficitDeadband = 0.05f;
+		const float CreepGrowthFloor = 0.5f;
+		const float CreepDeficitGain = 1f;
+		const float CreepLevelGain = 0.3f;
 
 		// Probing back towards full speed: the speed is raised by ProbeRate points per second at first, doubling
 		// every ProbeDoublingTime (ms) while everyone keeps up, up to MaxProbeRate. When the player the game was
@@ -166,11 +177,13 @@ namespace OpenRA.Server
 		const int ProbeDoublingTime = 10000;
 		const float LeaveProbeRate = 2f;
 
-		// A probe has failed when a player has been falling further behind for FallingBehindIntervalsBeforePaceChange
-		// intervals and is at least this many frame periods behind: enough to tell a computer at its ceiling from the
-		// small, corrected lag every client picks up while the frame period shrinks. The game then goes back to the
-		// speed that player was measured managing (never below where the probe started), and the creeping hold resumes.
-		const int ProbeFailureLateness = 3;
+		// A probe has failed when a player who was told to run faster has a backlog of at least ProbeFailureBacklog
+		// frames that has grown by at least ProbeFailureGrowth frames over the last FallingBehindIntervalsBeforePaceChange
+		// intervals: enough to tell a computer at its ceiling from the small, corrected lag every client picks up while
+		// the frame period shrinks. The game then goes back to the speed that player was measured managing (never below
+		// where the probe started), and the creeping hold resumes.
+		const int ProbeFailureBacklog = 3;
+		const int ProbeFailureGrowth = 2;
 
 		// A player is slowed down for once they are more than the lag budget behind, or once they are more than
 		// ReportBehindThreshold behind and falling behind fast enough to pass the budget within this long (ms):
@@ -227,6 +240,19 @@ namespace OpenRA.Server
 			public int BehindIntervals;
 			public readonly Queue<(long Time, int Frame)> Progress = new();
 			public readonly Queue<long> RecentBehind = new();
+
+			// The backlog in net frames (see CreepRate): frames closed beyond the client's last report, sampled once
+			// per control interval, the fewest ever seen (the frames in flight on its connection), and recent samples
+			public int LagFrames;
+			public int MinLagFrames = int.MaxValue;
+			public readonly Queue<int> RecentLagFrames = new();
+			public int Backlog => MinLagFrames == int.MaxValue ? 0 : Math.Max(0, LagFrames - MinLagFrames);
+
+			/// <summary>Growth of the frame lag over the recent samples, in frames per interval.</summary>
+			public float LagGrowth => RecentLagFrames.Count < 2 ? 0 : (float)(LagFrames - RecentLagFrames.Peek()) / (RecentLagFrames.Count - 1);
+
+			/// <summary>Growth of the frame lag over the whole window of recent samples, in frames.</summary>
+			public int LagGrowthOverWindow => RecentLagFrames.Count < FallingBehindIntervalsBeforePaceChange + 1 ? 0 : LagFrames - RecentLagFrames.Peek();
 			public bool IsSpectator;
 			public bool IsDefeated;
 			public bool IsTooSlow;
@@ -321,6 +347,12 @@ namespace OpenRA.Server
 		readonly int maxPlayerBuffer;
 		readonly float maxCatchUpSpeed;
 		readonly int maxWaitForStalledPlayer;
+		readonly int startDelay;
+
+		// The frame-backlog thresholds (see CreepRate), shrunk for a lag budget below the usual three seconds
+		readonly int creepBacklog;
+		readonly int creepPullBacklog;
+		readonly int probeFailureBacklog;
 		readonly Func<int, string> describeClient;
 		readonly Action<string> log;
 		readonly List<(int Client, string Message)> notices = new();
@@ -328,6 +360,7 @@ namespace OpenRA.Server
 
 		bool started;
 		long startedAt;
+		long loadedAt = -1;
 		int nextFrame;
 		double nextCloseTime;
 		long nextControlUpdate;
@@ -395,10 +428,12 @@ namespace OpenRA.Server
 		/// <param name="maxCatchUpSpeed">The fastest speed (percent of normal) a client far behind is asked to run at.</param>
 		/// <param name="maxWaitForStalledPlayer">The longest the game pauses (ms) for a player who was keeping up and has
 		/// stopped responding, before continuing without them. 0 never pauses.</param>
+		/// <param name="startDelay">How long (ms) the game waits after the last client has finished loading before the
+		/// first frame is closed, so that client can warm up its rendering like the others did while they waited.</param>
 		public FrameScheduler(int timestep, int netFrameInterval, int firstFrame, IEnumerable<int> clientIndices,
 			int maxPlayerLag = 0, Func<int, string> describeClient = null, Action<string> log = null,
 			IEnumerable<int> spectatorIndices = null, int minGameSpeed = 0, int maxPlayerBuffer = 1500,
-			int maxCatchUpSpeed = 400, int maxWaitForStalledPlayer = 3000)
+			int maxCatchUpSpeed = 400, int maxWaitForStalledPlayer = 3000, int startDelay = 0)
 		{
 			maxPace = minGameSpeed <= 0 ? PaceSanityLimit : Math.Min(PaceSanityLimit, 100f / minGameSpeed.Clamp(10, 100));
 			this.timestep = timestep;
@@ -407,11 +442,17 @@ namespace OpenRA.Server
 			this.maxPlayerBuffer = Math.Max(0, maxPlayerBuffer);
 			this.maxCatchUpSpeed = Math.Max(1 / MinTickScale, maxCatchUpSpeed.Clamp(100, 2000) / 100f);
 			this.maxWaitForStalledPlayer = Math.Max(0, maxWaitForStalledPlayer);
+			this.startDelay = Math.Max(0, startDelay);
 			this.describeClient = describeClient ?? (c => $"client {c}");
 			this.log = log ?? (_ => { });
 
 			// A player may always fall two frames behind before the game is slowed down for them
 			lagBudget = Math.Max(2 * netFrameInterval * timestep, maxPlayerLag);
+
+			var budgetFrames = lagBudget / (netFrameInterval * timestep);
+			creepBacklog = Math.Min(CreepBacklog, budgetFrames / 10);
+			creepPullBacklog = Math.Max(1, Math.Min(CreepPullBacklog, budgetFrames / 5));
+			probeFailureBacklog = Math.Max(1, Math.Min(ProbeFailureBacklog, budgetFrames * 3 / 20));
 
 			// Don't make everyone wait for a player who is still within the lag budget
 			windowSlack = Math.Max(WindowSlack, lagBudget + 1000);
@@ -772,8 +813,15 @@ namespace OpenRA.Server
 
 			if (!started)
 			{
-				// Wait until every client has finished loading and sent its first orders
+				// Wait until every client has finished loading and sent its first orders, and then a little longer
+				// (see startDelay) so that the last of them is as ready as the ones that waited for it
 				if (clients.Values.Any(c => c.LastReportedFrame < 1))
+					return false;
+
+				if (loadedAt < 0)
+					loadedAt = now;
+
+				if (now < loadedAt + startDelay)
 					return false;
 
 				started = true;
@@ -904,6 +952,16 @@ namespace OpenRA.Server
 					state.TargetSlack = BaseSlack + (int)((state.TargetSlack - BaseSlack) * Math.Pow(0.5, (double)Interval / BufferHalfLife));
 			}
 
+			// Each client's lag in net frames, and the fewest frames it has ever been behind by (its in-flight frames)
+			foreach (var state in clients.Values)
+			{
+				state.LagFrames = nextFrame - 1 - state.LastReportedFrame;
+				state.MinLagFrames = Math.Min(state.MinLagFrames, state.LagFrames);
+				state.RecentLagFrames.Enqueue(state.LagFrames);
+				while (state.RecentLagFrames.Count > FallingBehindIntervalsBeforePaceChange + 1)
+					state.RecentLagFrames.Dequeue();
+			}
+
 			// How far behind its target position each client is (ms). Positive: frames are waiting in its
 			// buffer for longer than needed, so it should run faster. Negative: it is close to running dry.
 			var behind = new Dictionary<int, long>();
@@ -1002,8 +1060,8 @@ namespace OpenRA.Server
 			// keeping up), and is held there.
 			if (probeRate > 0)
 			{
-				var failing = behind.Where(b => !clients[b.Key].ExemptFromPacing && b.Value > ProbeFailureLateness * nominalPeriod
-					&& clients[b.Key].FallingBehindIntervals >= FallingBehindIntervalsBeforePaceChange).Select(b => b.Key).ToList();
+				var failing = behind.Where(b => !clients[b.Key].ExemptFromPacing && clients[b.Key].WasToldToSpeedUp
+					&& clients[b.Key].Backlog >= probeFailureBacklog && clients[b.Key].LagGrowthOverWindow >= ProbeFailureGrowth).Select(b => b.Key).ToList();
 				if (failing.Count > 0)
 				{
 					var index = failing[0];
@@ -1123,26 +1181,39 @@ namespace OpenRA.Server
 				}
 				else if (holdFor >= 0 && clients.TryGetValue(holdFor, out var held) && !held.ExemptFromPacing)
 				{
-					if (behind.TryGetValue(holdFor, out var hb))
+					// A held player that sent nothing this interval may be stuck; their backlog says nothing until they report
+					if (behind.ContainsKey(holdFor))
 					{
-						// The creeping hold (see CreepRate): up a little while the held player keeps up, back in proportion
-						// to how far behind they are, never far below the ceiling that was measured for them
+						// The creeping hold (see CreepRate): up a little while the held player's backlog is small and steady,
+						// back in proportion to how fast it grows and how large it is, never far below the measured ceiling
 						var speed = 100 / pace;
-						var delta = (CreepRate - CreepGain * Math.Max(0, hb - CreepDeadband) / 1000f).Clamp(-CreepRampLimit, CreepRampLimit);
+						var backlog = held.Backlog;
+
+						// The deficit: how fast the backlog grows (frames per second, LagGrowth being per interval) beyond a
+						// deadband of CreepDeficitDeadband of the frames closed per second at this pace, or CreepGrowthFloor.
+						// A frame per second of growth is nominalPeriod/10 speed points short of the pace.
+						var growth = held.LagGrowth * 1000f / Interval;
+						var framesPerSecond = 1000f / (nominalPeriod * pace);
+						var deadband = Math.Max(CreepDeficitDeadband * framesPerSecond, CreepGrowthFloor);
+						var excess = Math.Max(0, growth - deadband);
+						var delta = (growth <= deadband && backlog <= creepBacklog ? CreepRate : 0)
+							- CreepDeficitGain * excess * nominalPeriod / 10f
+							- CreepLevelGain * Math.Max(0, backlog - creepPullBacklog);
+						delta = delta.Clamp(-CreepRampLimit, CreepRampLimit);
 						var floor = Math.Min(speed, 100 * ceilingSpeed * (1 - CreepFloor));
 						speed = Math.Min(100f, Math.Max(speed + delta, floor));
 						pace = 100 / speed;
 
-						// No resistance at the measured ceiling for long enough means the ceiling has moved up: probe
+						// Keeping up at the measured ceiling for long enough means the ceiling has moved up: probe
 						var atCeiling = speed >= (100 + CreepAboveCeiling) * ceilingSpeed;
 						var recentHole = held.OpenHoleStart >= 0 || held.Holes.Any(h => h.End > now - FallingBehindIntervalsBeforePaceChange * Interval);
 						if (recentHole)
 						{
 							// Says nothing about the computer
 						}
-						else if (hb > 2 * CreepDeadband)
+						else if (growth > 2 * deadband || backlog > creepPullBacklog)
 							freeIntervals = 0;
-						else if (hb < CreepDeadband && atCeiling)
+						else if (growth <= deadband && backlog <= creepBacklog && atCeiling)
 							freeIntervals++;
 
 						if (pace > 1f && freeIntervals >= CreepFreeIntervals)

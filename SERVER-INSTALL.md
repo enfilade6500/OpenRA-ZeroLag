@@ -57,7 +57,7 @@ Passed like any other server setting (command line, `settings.yaml`, or your ser
 environment file):
 
 ```
-Server.VoteKickSlowest=True         # players can type !kickslow (recommended)
+Server.VoteKickSlowest=True         # players can type !kickslow, or just kickslow (recommended)
 Server.NameSlowestPlayer=True       # chat messages name the slow player
 Server.AnnounceGameSpeed=False      # no chat messages about game speed (log only; players can also !quiet)
 Server.MinGameSpeed=0               # no floor: follow the slowest PC however slow (default 30: a PC needing less is left behind)
@@ -65,6 +65,7 @@ Server.MaxPlayerLag=0               # slow everyone as soon as a PC falls behind
 Server.MaxPlayerBuffer=0            # no adaptive buffering for lossy connections (default 1500 ms)
 Server.MaxCatchUpSpeed=200          # ask a player far behind for at most 2x (default 400)
 Server.MaxWaitForStalledPlayer=0    # never pause for a player who stops responding (default 3000 ms)
+Server.StartDelay=0                 # start the moment the last player has loaded (default 2000 ms: let their graphics warm up first)
 Server.Netcode=classic              # original behaviour, without swapping the file back
 Server.ZeroLagNotice=True           # add a "this is a ZeroLag server, type !speed" line when players join
 ```

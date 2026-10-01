@@ -14,6 +14,13 @@ the proposed changes:
   cubic_ramp          probe slowly near the last known ceiling, fast away from it
   dither              during a hold, modulate the pace +-A and re-probe when the lag stops responding
   rate_trigger        slow down early when the projected lag exceeds the budget
+  creep               (v1.2) hold near the measured ceiling, creeping up, pulled back by the lateness level
+  frames              (v1.3) the hold and probe-failure test read the backlog in net frames (frame lag minus the
+                      client's in-flight minimum) and its growth, which a constant lateness offset cannot disturb
+
+The plant can give a client a constant lateness offset (offset=, ms: an RTT estimate error or any other
+constant in the server's slack measure) and gives each client 1-4 in-flight frames; the 'offset*' scenarios
+reproduce the super maq hold of 1 Oct 2026, which v1.2 never released.
 
 Usage: python3 policysim.py [--seeds N] [--minutes M] [--json out.json] [--trace scenario policy]
 """
@@ -26,10 +33,13 @@ INTERVAL = 1.0             # s, control interval
 # ----------------------------------------------------------------------------- plant
 
 class Player:
-    def __init__(self, name, cap_fn, jitter=10.0, hole_rate=0.0, hole_median=0.5, noise_sigma=0.04, rng=None):
+    def __init__(self, name, cap_fn, jitter=10.0, hole_rate=0.0, hole_median=0.5, noise_sigma=0.04, rng=None, offset=0.0):
         self.name = name
         self.cap_fn = cap_fn
         self.jitter = jitter
+        self.offset = offset     # ms the server's lateness measure reads high for this client (RTT estimate error etc.)
+        self.inflight = rng.randint(1, 4) if rng else 2   # net frames between the server's frontier and a client that keeps up (its RTT)
+        self.lag_frames = 0.0    # the server's per-interval reading of frames closed since the client's last reported frame
         self.hole_rate = hole_rate
         self.hole_median = hole_median
         self.noise_sigma = noise_sigma
@@ -65,7 +75,9 @@ class Player:
         self.L += produced - processed
         self.frames += processed
         # measured lateness (ms of wall clock at the current pace) with jitter
-        b = self.L / pace_speed * 1000.0 + self.rng.gauss(0, self.jitter)
+        b = self.L / pace_speed * 1000.0 + self.offset + self.rng.gauss(0, self.jitter)
+        # frame lag: backlog in net frames plus the in-flight frames, sampled at a random phase (+-1 frame)
+        self.lag_frames = max(0, round(self.L / (NOMINAL / 1000.0) + self.inflight + self.rng.uniform(-1, 1)))
         return b
 
 # ----------------------------------------------------------------------------- controller
@@ -77,6 +89,10 @@ class Policy:
                  dither_phases=4, headroom=0.97, hold_doubling=True, post_recovery_mode='double', evidence_ttl=45.0,
                  drain_gain=0.2, drain_cap=0.06, ramp_limit=1.0,
                  creep=False, creep_rate=0.2, creep_gain=5.0, creep_deadband=100.0, creep_free=15.0, creep_free_b=50.0,
+                 trend=False, growth_deadband=50.0, growth_gain=0.1, level_soft=1000.0, level_gain=2.0, level_gate=1500.0,
+                 relative=False, excess_creep=150.0, excess_pull=400.0, min_decay=20.0, stall_timeout=1e9,
+                 frames=False, f_growth_deadband=0.5, f_deficit_deadband=0.05, f_growth_gain=1.0, f_backlog_creep=2.0, f_backlog_pull=5.0, f_level_gain=0.3,
+                 f_fail=False, f_fail_growth=None, caution_band=0.0,
                  v10=False, v10_blind=False):
         self.name = name
         self.measured_revert = measured_revert
@@ -105,6 +121,27 @@ class Policy:
         self.creep_deadband = creep_deadband
         self.creep_free = creep_free
         self.creep_free_b = creep_free_b
+        self.trend = trend                      # hold reacts to lag growth, not lag level
+        self.growth_deadband = growth_deadband  # ms/s of lag growth tolerated as noise
+        self.growth_gain = growth_gain          # speed points per (ms/s) of growth beyond the deadband
+        self.level_soft = level_soft            # ms of lag above which the hold also pulls back gently
+        self.level_gain = level_gain            # speed points per second per second of lag beyond level_soft
+        self.level_gate = level_gate            # ms of lag beyond which the player does not count as keeping up
+        self.relative = relative                # level terms relative to the lowest lateness seen in this hold
+        self.excess_creep = excess_creep        # creep only while lateness is within this of the hold's low point (ms)
+        self.excess_pull = excess_pull          # pull back when lateness exceeds the low point by more than this (ms)
+        self.min_decay = min_decay              # the low point is allowed to rise this much per second (ms), so it tracks the recent floor
+        self.stall_timeout = stall_timeout      # s: a hold this old counts free intervals even below the ceiling (a constant offset can stall the creep)
+        self.frames = frames                    # hold driven by the backlog in net frames (frame lag minus the client's in-flight minimum) and its growth
+        self.f_growth_deadband = f_growth_deadband  # frames/s of lag growth tolerated as noise (floor; the lag is sampled to the frame)
+        self.f_deficit_deadband = f_deficit_deadband  # ...or this share of the frames closed per second at the pace, if larger
+        self.f_growth_gain = f_growth_gain      # pull-back: this x (growth beyond the deadband, in frames/s) x NOMINAL/10 speed points per second
+        self.f_backlog_creep = f_backlog_creep  # creep only while the backlog is at most this many frames
+        self.f_backlog_pull = f_backlog_pull    # pull back while the backlog exceeds this many frames
+        self.f_level_gain = f_level_gain        # speed points per second per frame of backlog beyond that
+        self.f_fail = f_fail                    # probe failure judged on the frame backlog (>= 3 frames and growing), not on lateness ms
+        self.f_fail_growth = f_fail_growth      # if set: 'growing' means the lag rose by at least this many frames over the last 3 intervals
+        self.caution_band = caution_band        # points above the last measured ceiling within which a probe keeps its initial rate (no doubling)
         self.v10 = v10
         self.v10_blind = v10_blind
 
@@ -117,6 +154,8 @@ class CState:
         self.progress = collections.deque(maxlen=4)   # (t, frames)
         self.holes = collections.deque(maxlen=4)      # hole seconds per interval, aligned with progress
         self.b_hist = collections.deque(maxlen=4)
+        self.lag_hist = collections.deque(maxlen=4)   # frame-lag readings
+        self.min_lag = None                           # lowest frame lag seen: the client's in-flight frames
 
 class Controller:
     PACE_HEADROOM = 0.97
@@ -161,6 +200,7 @@ class Controller:
         self.phase_mean = None
         self.free_since = None
         self.phase_evidence = collections.deque(maxlen=self.p.dither_phases)
+        self.hold_min_b = None     # lowest lateness seen during this hold (tracks the client's constant offset)
         self.events = []
 
     # --- helpers
@@ -185,8 +225,10 @@ class Controller:
         self.phase_mean = None
         self.free_since = None
         self.phase_evidence.clear()
+        self.hold_min_b = None
 
-    def update(self, now, behind, frames, holes, applied_speed_prev):
+    def update(self, now, behind, frames, holes, applied_speed_prev, lagframes=None):
+        lagframes = lagframes or {}
         """behind: name -> measured lateness ms; frames: name -> processed game-seconds; holes: name -> hole seconds this interval.
         Returns (mean_pace_speed, applied_speed, rates: name -> requested rate)."""
         P = self.p
@@ -194,11 +236,18 @@ class Controller:
         for n in self.names:
             st = self.s[n]
             b = behind[n]
-            st.falling = st.falling + 1 if (st.told_faster and b > st.last_behind) else 0
+            if P.f_fail:
+                lf0 = lagframes.get(n, 0)
+                st.falling = st.falling + 1 if (st.told_faster and len(st.lag_hist) > 0 and lf0 > st.lag_hist[-1]) else 0
+            else:
+                st.falling = st.falling + 1 if (st.told_faster and b > st.last_behind) else 0
             st.behind_intervals = st.behind_intervals + 1 if (st.told_faster and b > 2 * NOMINAL) else 0
             st.progress.append((now, frames[n]))
             st.holes.append(holes[n])
             st.b_hist.append(b)
+            lf = lagframes.get(n, 0)
+            st.lag_hist.append(lf)
+            st.min_lag = lf if st.min_lag is None else min(st.min_lag, lf)
 
         cannot_keep_up = False
 
@@ -229,7 +278,14 @@ class Controller:
 
         # probe failure
         if self.probe_rate > 0 and not P.v10:
-            failing = [n for n in self.names if behind[n] > self.FAIL_LATENESS * NOMINAL and self.s[n].falling >= self.FALLING_N]
+            if P.f_fail and P.f_fail_growth is not None:
+                failing = [n for n in self.names if len(self.s[n].lag_hist) >= 4 and self.s[n].told_faster
+                           and self.s[n].lag_hist[-1] - (self.s[n].min_lag or 0) >= self.FAIL_LATENESS
+                           and self.s[n].lag_hist[-1] - self.s[n].lag_hist[0] >= P.f_fail_growth]
+            elif P.f_fail:
+                failing = [n for n in self.names if self.s[n].lag_hist and self.s[n].lag_hist[-1] - (self.s[n].min_lag or 0) >= self.FAIL_LATENESS and self.s[n].falling >= self.FALLING_N]
+            else:
+                failing = [n for n in self.names if behind[n] > self.FAIL_LATENESS * NOMINAL and self.s[n].falling >= self.FALLING_N]
             if failing:
                 who = failing[0]
                 from_speed = self.speed()
@@ -313,8 +369,26 @@ class Controller:
             st = self.s[self.hold_for]
             recent_hole = any(h > 0 for h in st.holes)
             if self.free_since is None: self.free_since = 0
+            g = (st.b_hist[-1] - st.b_hist[0]) / max(1, len(st.b_hist) - 1) if len(st.b_hist) >= 2 else 0.0
+            if P.frames:
+                lh = st.lag_hist
+                fg = (lh[-1] - lh[0]) / max(1, len(lh) - 1) if len(lh) >= 2 else 0.0
+                backlog = lh[-1] - (st.min_lag or 0)
             if recent_hole:
                 pass
+            elif P.frames:
+                fps = 1000.0 / (NOMINAL * self.pace)
+                dead = max(P.f_deficit_deadband * fps, P.f_growth_deadband)
+                if fg > 2 * dead or backlog > P.f_backlog_pull:
+                    self.free_since = 0
+                elif fg <= dead and backlog <= P.f_backlog_creep and at_ceiling:
+                    self.free_since += 1
+            elif P.trend:
+                excess = (b - self.hold_min_b) if (P.relative and self.hold_min_b is not None) else 0.0
+                if g > 2 * P.growth_deadband or (P.relative and excess > P.excess_pull):
+                    self.free_since = 0
+                elif g <= P.growth_deadband and b <= P.level_gate and excess <= P.excess_creep and (at_ceiling or now - self.hold_started >= P.stall_timeout):
+                    self.free_since += 1
             elif b > 2 * P.creep_deadband:
                 self.free_since = 0
             elif b < P.creep_deadband and at_ceiling:
@@ -334,6 +408,9 @@ class Controller:
             else:
                 self.probe_rate = min(self.MAX_PROBE_RATE, self.PROBE_RATE * 2 ** ((now - self.probe_since) / self.DOUBLING))
             rate = self.probe_rate
+            if P.caution_band > 0 and self.last_ceiling is not None and self.speed() < self.last_ceiling + P.caution_band:
+                rate = self.PROBE_RATE
+                self.probe_since = now   # doubling starts once past the band
             if P.cubic_ramp and self.last_ceiling is not None:
                 s = self.speed()
                 if s < self.last_ceiling - 2:
@@ -361,7 +438,28 @@ class Controller:
             b = max(0.0, behind.get(self.hold_for, 0.0))
             if self.hold_mean is None:
                 self.hold_mean = self.hold_speed
-            delta = P.creep_rate - P.creep_gain * max(0.0, b - P.creep_deadband) / 1000.0
+            if P.frames:
+                st = self.s[self.hold_for]
+                lh = st.lag_hist
+                fg = (lh[-1] - lh[0]) / max(1, len(lh) - 1) if len(lh) >= 2 else 0.0
+                backlog = lh[-1] - (st.min_lag or 0)
+                fps = 1000.0 / (NOMINAL * self.pace)
+                dead = max(P.f_deficit_deadband * fps, P.f_growth_deadband)
+                delta = (P.creep_rate if (fg <= dead and backlog <= P.f_backlog_creep) else 0.0) \
+                    - P.f_growth_gain * max(0.0, fg - dead) * NOMINAL / 10.0 - P.f_level_gain * max(0.0, backlog - P.f_backlog_pull)
+            elif P.trend and P.relative:
+                st = self.s[self.hold_for]
+                g = (st.b_hist[-1] - st.b_hist[0]) / max(1, len(st.b_hist) - 1) if len(st.b_hist) >= 2 else 0.0
+                self.hold_min_b = b if self.hold_min_b is None else min(b, self.hold_min_b + P.min_decay)
+                excess = b - self.hold_min_b
+                delta = (P.creep_rate if (g <= P.growth_deadband and excess <= P.excess_creep) else 0.0) \
+                    - P.growth_gain * max(0.0, g - P.growth_deadband) - P.level_gain * max(0.0, excess - P.excess_pull) / 1000.0
+            elif P.trend:
+                st = self.s[self.hold_for]
+                g = (st.b_hist[-1] - st.b_hist[0]) / max(1, len(st.b_hist) - 1) if len(st.b_hist) >= 2 else 0.0
+                delta = P.creep_rate - P.growth_gain * max(0.0, g - P.growth_deadband) - P.level_gain * max(0.0, b - P.level_soft) / 1000.0
+            else:
+                delta = P.creep_rate - P.creep_gain * max(0.0, b - P.creep_deadband) / 1000.0
             self.hold_mean += max(-P.ramp_limit, min(P.ramp_limit, delta))
             floor = self.hold_speed / self.PACE_HEADROOM * (1 - P.drain_cap)   # never far below the last measured ceiling
             self.hold_mean = min(100.0, max(self.hold_mean, floor, 30.0))
@@ -468,6 +566,18 @@ def make_players(scenario, rng, seconds):
         slow = [Player('edge', lambda t: 1.03, jitter=15, rng=rng)]
     elif scenario == 'lossy':
         slow = [Player('dazzle', lambda t: 1.2, jitter=20, hole_rate=0.25, hole_median=0.4, rng=rng)]
+    elif scenario == 'offset':
+        # a steady 75% player whose lateness reads 600 ms high, among players reading 0-300 ms high (super maq, Oct 1)
+        slow = [Player('maq', lambda t: 0.75, jitter=15, rng=rng, offset=600.0)]
+        for o in others: o.offset = rng.uniform(0, 300)
+    elif scenario == 'edge':
+        slow = [Player('sas', ou_trace(rng, seconds + 2, 0.90, 0.04, 90.0, 0.7, 1.1), jitter=15, rng=rng)]
+    elif scenario == 'offsethi':
+        slow = [Player('hi', piecewise([(0, 1.02), (300, 1.02), (360, 0.60), (480, 0.60), (540, 0.85), (900, 0.85), (960, 1.05), (seconds, 1.05)]), jitter=15, rng=rng, offset=950.0)]
+        for o in others: o.offset = rng.uniform(0, 300)
+    elif scenario == 'offsetdip':
+        slow = [Player('melo', piecewise([(0, 1.02), (300, 1.02), (360, 0.60), (480, 0.60), (540, 0.85), (900, 0.85), (960, 1.05), (seconds, 1.05)]), jitter=15, rng=rng, offset=600.0)]
+        for o in others: o.offset = rng.uniform(0, 300)
     elif scenario == 'twoslow':
         slow = [Player('slowA', ou_trace(rng, seconds + 2, 0.80, 0.06, 90.0, 0.5, 1.2), jitter=15, rng=rng),
                 Player('slowB', ou_trace(rng, seconds + 2, 0.70, 0.06, 90.0, 0.5, 1.2), jitter=15, rng=rng)]
@@ -476,7 +586,7 @@ def make_players(scenario, rng, seconds):
         raise ValueError(scenario)
     return slow + others
 
-SCENARIOS = ['dip', 'wander', 'spiky', 'steady', 'healthy', 'lossy', 'twoslow']
+SCENARIOS = ['dip', 'wander', 'spiky', 'steady', 'healthy', 'lossy', 'twoslow', 'offset', 'offsetdip', 'offsethi', 'edge']
 
 POLICIES = [
     Policy('v1.0', v10=True, v10_blind=True),
@@ -488,14 +598,21 @@ POLICIES = [
     Policy('creep0.3', measured_revert=True, post_recovery_hold=True, post_recovery_mode='fixed', creep=True, rate_trigger=True, creep_rate=0.3),
     Policy('creep0.4', measured_revert=True, post_recovery_hold=True, post_recovery_mode='fixed', creep=True, rate_trigger=True, creep_rate=0.4),
     Policy('creepFast', measured_revert=True, post_recovery_hold=True, post_recovery_mode='fixed', creep=True, rate_trigger=True, creep_rate=0.6, creep_deadband=300.0, creep_free=10.0),
+    Policy('v1.2', measured_revert=True, post_recovery_hold=True, post_recovery_mode='fixed', creep=True, rate_trigger=True, creep_rate=0.3),
+    Policy('v1.3', measured_revert=True, post_recovery_hold=True, post_recovery_mode='fixed', creep=True, rate_trigger=True, creep_rate=0.3,
+           creep_free=15.0, frames=True, f_backlog_creep=2.0, f_backlog_pull=4.0, f_fail=True, f_fail_growth=2),
 ]
 
 # ----------------------------------------------------------------------------- run
+
+JITTER_SCALE = 1.0
 
 def run(scenario, policy, seed, minutes=20, trace=False):
     rng = random.Random(seed)
     seconds = minutes * 60
     players = make_players(scenario, rng, seconds)
+    for p in players:
+        p.jitter *= JITTER_SCALE
     names = [p.name for p in players]
     ctl = Controller(policy, names)
     applied = 100.0; mean_speed = 100.0
@@ -503,11 +620,11 @@ def run(scenario, policy, seed, minutes=20, trace=False):
     slow_b = []
     rows = []
     for t in range(seconds):
-        behind, frames, holes = {}, {}, {}
+        behind, frames, holes, lagf = {}, {}, {}, {}
         for p in players:
             b = p.step(t, applied / 100.0)
-            behind[p.name] = b; frames[p.name] = p.frames; holes[p.name] = p.hole_time
-        mean_speed, applied, rates = ctl.update(t + 1, behind, frames, holes, applied)
+            behind[p.name] = b; frames[p.name] = p.frames; holes[p.name] = p.hole_time; lagf[p.name] = p.lag_frames
+        mean_speed, applied, rates = ctl.update(t + 1, behind, frames, holes, applied, lagf)
         for p in players:
             p.pending_rate = rates[p.name]
         speeds.append(mean_speed); applied_speeds.append(applied)
@@ -520,7 +637,10 @@ def run(scenario, policy, seed, minutes=20, trace=False):
     tv = sum(abs(a - b) for a, b in zip(speeds[1:], speeds[:-1]))
     tv_applied = sum(abs(a - b) for a, b in zip(applied_speeds[1:], applied_speeds[:-1]))
     changes = sum(1 for a, b in zip(speeds[1:], speeds[:-1]) if abs(a - b) >= 3)
+    # how long the game stayed slowed after the slow player could keep up again (capacity >= 1 and lag gone)
+    stuck = sum(1 for t in range(seconds) if applied_speeds[t] < 99.5 and players[0].cap_fn(t) >= 1.0 and slow_b[t] < 200)
     m = dict(
+        stuck=stuck,
         lost=100 - statistics.mean(applied_speeds),
         below=100.0 * sum(1 for s in applied_speeds if s < 99.5) / len(applied_speeds),
         events_h=(kinds['slow'] + kinds['fail'] + kinds['full']) / hours,
@@ -532,10 +652,24 @@ def run(scenario, policy, seed, minutes=20, trace=False):
     )
     return m, ev, rows
 
-SLOW_SCENARIOS = ['dip', 'wander', 'spiky', 'steady', 'twoslow']
+SLOW_SCENARIOS = ['dip', 'wander', 'spiky', 'steady', 'twoslow', 'offset', 'offsetdip', 'offsethi', 'edge']
 
 def sweep(args):
     base = dict(measured_revert=True, post_recovery_hold=True, dither=True, rate_trigger=True)
+    T = dict(measured_revert=True, post_recovery_hold=True, post_recovery_mode='fixed', creep=True, rate_trigger=True, creep_rate=0.3, trend=True)
+    if args.trend_sweep:
+        variants = [
+            ('v1.2', dict(measured_revert=True, post_recovery_hold=True, post_recovery_mode='fixed', creep=True, rate_trigger=True, creep_rate=0.3)),
+            ('soft800 g1.5 free30', dict(T, level_soft=800.0, level_gain=1.5, creep_free=30.0)),
+            ('frames', dict(T, trend=False, frames=True)),
+            ('frames free30', dict(T, trend=False, frames=True, creep_free=30.0)),
+            ('frames free30 ffail', dict(T, trend=False, frames=True, creep_free=30.0, f_fail=True)),
+            ('frames ffail g2 b4 (v1.3)', dict(T, trend=False, frames=True, f_fail=True, f_fail_growth=2, f_backlog_pull=4.0)),
+            ('v1.3 free30', dict(T, trend=False, frames=True, creep_free=30.0, f_fail=True, f_fail_growth=2, f_backlog_pull=4.0)),
+            ('v1.3 cautious probe', dict(T, trend=False, frames=True, f_fail=True, f_fail_growth=2, f_backlog_pull=4.0, caution_band=10.0)),
+            ('frames creep1 pull4 ffail', dict(T, trend=False, frames=True, creep_free=30.0, f_backlog_creep=1.0, f_backlog_pull=4.0, f_fail=True)),
+        ]
+        print_sweep(args, variants); return
     variants = [
         ('v1.1', {}), ('+revert', dict(measured_revert=True)),
         ('+recovery(double)', dict(measured_revert=True, post_recovery_hold=True)),
@@ -556,7 +690,10 @@ def sweep(args):
         ('creep free 30s', dict(measured_revert=True, post_recovery_hold=True, post_recovery_mode='fixed', creep=True, rate_trigger=True, creep_free=30.0)),
         ('creep no trigger', dict(measured_revert=True, post_recovery_hold=True, post_recovery_mode='fixed', creep=True)),
     ]
-    print(f"{'variant':26} {'lost%':>6} {'events/h':>9} {'TV/h':>7} {'slow lag ms':>12} {'slow>1s%':>9} {'slow max ms':>12}   (mean over {', '.join(SLOW_SCENARIOS)}; {args.seeds} seeds)")
+    print_sweep(args, variants)
+
+def print_sweep(args, variants):
+    print(f"{'variant':26} {'lost%':>6} {'events/h':>9} {'TV/h':>7} {'slow lag ms':>12} {'slow>1s%':>9} {'slow max ms':>12} {'stuck s':>8}   (mean over {', '.join(SLOW_SCENARIOS)}; {args.seeds} seeds)")
     out = {}
     for name, kw in variants:
         pol = Policy(name, **kw)
@@ -566,7 +703,8 @@ def sweep(args):
             per[sc] = {k: statistics.mean(m[k] for m in ms) for k in ms[0]}
         agg = {k: statistics.mean(per[sc][k] for sc in SLOW_SCENARIOS) for k in per[SLOW_SCENARIOS[0]]}
         out[name] = dict(agg=agg, per=per)
-        print(f"{name:26} {agg['lost']:6.1f} {agg['events_h']:9.1f} {agg['tv_h']:7.0f} {agg['slow_mean_b']:12.0f} {agg['slow_over1s']:9.1f} {agg['slow_max_b']:12.0f}")
+        print(f"{name:26} {agg['lost']:6.1f} {agg['events_h']:9.1f} {agg['tv_h']:7.0f} {agg['slow_mean_b']:12.0f} {agg['slow_over1s']:9.1f} {agg['slow_max_b']:12.0f} {agg['stuck']:8.0f}"
+              + "   " + " ".join(f"{sc[:4]}:{per[sc]['lost']:.0f}/{per[sc]['events_h']:.0f}/{per[sc]['stuck']:.0f}" for sc in SLOW_SCENARIOS))
     if args.json:
         json.dump(out, open(args.json, 'w'), indent=1)
 
@@ -578,8 +716,12 @@ def main():
     ap.add_argument('--trace', nargs=2, metavar=('SCENARIO', 'POLICY'))
     ap.add_argument('--scenarios', nargs='*', default=SCENARIOS)
     ap.add_argument('--sweep', action='store_true')
+    ap.add_argument('--trend-sweep', action='store_true')
+    ap.add_argument('--jitter', type=float, default=1.0, help='multiply all lateness measurement jitter (default 1 = 10-30 ms)')
     args = ap.parse_args()
-    if args.sweep:
+    global JITTER_SCALE
+    JITTER_SCALE = args.jitter
+    if args.sweep or args.trend_sweep:
         sweep(args); return
     if args.trace:
         sc, pn = args.trace
@@ -600,7 +742,7 @@ def main():
             ms = [run(sc, pol, seed, args.minutes)[0] for seed in range(args.seeds)]
             agg = {k: statistics.mean(m[k] for m in ms) for k in ms[0]}
             results[(sc, pol.name)] = agg
-    cols = [('lost', 'lost%'), ('below', 'below100%'), ('events_h', 'events/h'), ('changes_h', 'chg>=3/h'), ('tv_h', 'TV/h'), ('tv_applied_h', 'TV+dither/h'),
+    cols = [('lost', 'lost%'), ('below', 'below100%'), ('stuck', 'stuck s'), ('events_h', 'events/h'), ('changes_h', 'chg>=3/h'), ('tv_h', 'TV/h'), ('tv_applied_h', 'TV+dither/h'),
             ('slow_mean_b', 'slow mean lag ms'), ('slow_over1s', 'slow >1s %'), ('slow_max_b', 'slow max lag ms'), ('fails', 'fails'), ('reprobes', 'reprobes')]
     for sc in args.scenarios:
         print(f"\n== {sc}  ({args.seeds} seeds x {args.minutes} min)")

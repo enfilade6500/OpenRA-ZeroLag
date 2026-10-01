@@ -1092,8 +1092,18 @@ namespace OpenRA.Server
 		/// </summary>
 		bool InterpretChatCommand(Connection conn, string text)
 		{
-			if (string.IsNullOrEmpty(text) || (text[0] != '!' && text[0] != '-'))
+			if (string.IsNullOrEmpty(text))
 				return false;
+
+			// The vote command typed without its '!' counts too; it is then relayed as chat as well, as the sender meant it
+			if (text[0] != '!' && text[0] != '-')
+			{
+				if (slowestPlayerVote == null || !SlowestPlayerVote.IsBareCommand(text))
+					return false;
+
+				slowestPlayerVote.Vote(conn, Game.RunTime, frameScheduler.SlowestPlayer?.Client);
+				return false;
+			}
 
 			var command = "!" + text.Trim().ToLowerInvariant()[1..];
 			if (command == "!speed")
@@ -1654,7 +1664,7 @@ namespace OpenRA.Server
 					frameScheduler = new FrameScheduler(gameSpeed.Timestep, LobbyInfo.GlobalSettings.NetFrameInterval,
 						firstFrame + OrderLatency, validConns.Select(c => c.PlayerIndex), Settings.MaxPlayerLag,
 						DescribeClient, message => Log.Write("server", message), spectators, Settings.MinGameSpeed,
-						Settings.MaxPlayerBuffer, Settings.MaxCatchUpSpeed, Settings.MaxWaitForStalledPlayer);
+						Settings.MaxPlayerBuffer, Settings.MaxCatchUpSpeed, Settings.MaxWaitForStalledPlayer, Settings.StartDelay);
 
 					var voteKickSlowest = Settings.VoteKickSlowest && Settings.EnableVoteKick;
 					if (voteKickSlowest)

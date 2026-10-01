@@ -257,6 +257,10 @@ namespace OpenRA.Test
 			// before UpDeadUntil (and then everything queued arrives at once, like TCP after a retransmission)
 			public long DownDeadUntil;
 			public long UpDeadUntil;
+
+			// Extra one-way delay on the download side that the client's ping does not show (ms): the server then reads
+			// this client's lateness that much too high, like a client whose round trip is underestimated
+			public long ExtraDelay;
 			readonly Queue<int> outbox = new();
 			public float MinScale = 1f;
 
@@ -307,7 +311,7 @@ namespace OpenRA.Test
 
 		static (List<string> Logs, FrameScheduler Scheduler, List<SimClient> Clients) RunWithCapacities(
 			double[] capacities, long duration, int minGameSpeed, Action<long, List<SimClient>, FrameScheduler> onSecond = null,
-			int maxPlayerLag = 0, int maxPlayerBuffer = 1500, int maxWait = 3000)
+			int maxPlayerLag = 3000, int maxPlayerBuffer = 1500, int maxWait = 3000, long[] extraDelays = null)
 		{
 			const int Timestep = 40, Interval = 3, First = 4, Delay = 20;
 			var logs = new List<string>();
@@ -316,6 +320,7 @@ namespace OpenRA.Test
 			var clients = indices.Select(i => new SimClient(i, capacities[i], Timestep, First)).ToList();
 			foreach (var c in clients)
 			{
+				c.ExtraDelay = extraDelays?[c.Index] ?? 0;
 				s.ReceivePing(c.Index, new[] { 2 * Delay }, 0);
 				for (var f = 1; f < First; f++)
 					s.ReceivePacket(c.Index, f, Order, 0);
@@ -325,7 +330,7 @@ namespace OpenRA.Test
 			{
 				while (s.TryCloseFrame(t, out var frame, out _))
 					foreach (var c in clients)
-						c.Inbox.Enqueue((frame, Math.Max(t, c.DownDeadUntil) + Delay));
+						c.Inbox.Enqueue((frame, Math.Max(t, c.DownDeadUntil) + Delay + c.ExtraDelay));
 
 				foreach (var c in clients)
 					c.Run(s, t, Timestep, Interval);
@@ -383,8 +388,9 @@ namespace OpenRA.Test
 		[Test]
 		public void KickedSlowestPlayerSpeedsBackUp()
 		{
-			// P1 (80%) slows the game; at 30s P1 is kicked. Nobody else has been tested above 78% since, so the game
-			// does not jump to 100%: it speeds back up briskly from where it is, and is at full speed within 15s.
+			// P1 (80%) slows the game; at 30s P1 is kicked. Nobody else has been tested above the held speed (a few
+			// points under 80%) since, so the game does not jump to 100%: it speeds back up briskly from where it is,
+			// and is at full speed within 15s.
 			var speedAfterKick = new List<(long T, int Speed)>();
 			var (logs, _, _) = RunWithCapacities(new[] { 2.0, 0.8, 2.0 }, 50000, 0, (t, cs, sched) =>
 			{
@@ -395,7 +401,7 @@ namespace OpenRA.Test
 			});
 
 			var speeds = speedAfterKick.Select(x => x.Speed).ToList();
-			Assert.That(speeds[0], Is.InRange(78, 99), "The game should not jump to full speed the second after the kick.");
+			Assert.That(speeds[0], Is.InRange(74, 99), "The game should not jump to full speed the second after the kick.");
 			Assert.That(speeds.Zip(speeds.Skip(1), (a, b) => b >= a), Is.All.True, "The speed should only rise after the kick.");
 			Assert.That(speedAfterKick.First(x => x.Speed == 100).T - 30000, Is.LessThanOrEqualTo(15000), "Full speed should be reached within 15s of the kick.");
 			Assert.That(logs.Any(l => l.Contains("P1 has left; speeding the game back up")), Is.True);
@@ -718,6 +724,67 @@ namespace OpenRA.Test
 			Assert.That(logs.Any(l => l.Contains("too slow")), Is.False, "Nobody should be left behind in a two-player game.");
 			Assert.That(minSpeed, Is.LessThanOrEqualTo(40), "The game should follow the slower computer.");
 			Assert.That(clients[0].NextFrame - clients[1].NextFrame, Is.LessThan(40), "The two players should stay together.");
+		}
+
+		[Test]
+		public void OffsetClientIsNotHeldForever()
+		{
+			// P1 manages 75% and its lateness reads 600 ms high (its round trip is longer than its ping says). After the
+			// slowdown the hold must still work, and when P1's computer recovers at 45s the game must get back to full
+			// speed within 90s. In v1.2 such a client was held at the measured speed for the rest of the game.
+			var fullAt = -1L;
+			var (logs, s, clients) = RunWithCapacities(new[] { 2.0, 0.75, 2.0 }, 150000, 0, (t, cs, sched) =>
+			{
+				if (t == 45000)
+					cs[1].Capacity = 2.0;
+				if (t > 45000 && fullAt < 0 && sched.SpeedPercent == 100)
+					fullAt = t;
+			}, extraDelays: new long[] { 0, 600, 0 });
+
+			Assert.That(logs.Any(l => l.StartsWith("Slowing the game", StringComparison.Ordinal) && l.Contains("P1")), Is.True, "Precondition: P1 was slowed down for.");
+			Assert.That(fullAt, Is.GreaterThan(0), "The game should get back to full speed after P1 recovers.");
+			Assert.That(fullAt - 45000, Is.LessThanOrEqualTo(90000), "Full speed should come within 90s of the recovery.");
+			Assert.That(s.SpeedPercent, Is.EqualTo(100));
+			Assert.That(clients[0].NextFrame - clients[1].NextFrame, Is.LessThan(20), "P1 should end close to the others.");
+		}
+
+		[Test]
+		public void OffsetClientSettlesLikeAnyOther()
+		{
+			// P1 manages a steady 75% with a 600 ms lateness offset: the hold settles near 75% and probes only now and
+			// then, as it would for a client with no offset.
+			var speeds = new List<int>();
+			var (logs, _, clients) = RunWithCapacities(new[] { 2.0, 0.75, 2.0 }, 180000, 0, (t, cs, sched) =>
+			{
+				if (t >= 40000)
+					speeds.Add(sched.SpeedPercent);
+			}, extraDelays: new long[] { 0, 600, 0 });
+
+			Assert.That(logs.Count(l => l.StartsWith("Slowing the game", StringComparison.Ordinal)), Is.LessThanOrEqualTo(2), "At most two slowdowns.");
+			Assert.That(logs.Count(l => l.StartsWith("Speeding the game up to", StringComparison.Ordinal)), Is.LessThanOrEqualTo(3),
+				"At most three failed probes in three minutes.");
+			Assert.That(speeds.Min(), Is.GreaterThanOrEqualTo(66));
+			Assert.That(speeds.Max(), Is.LessThanOrEqualTo(85), "The speed should stay within a few points of the ceiling.");
+			Assert.That(clients[0].NextFrame - clients[1].NextFrame, Is.LessThan(20), "P1 should stay close to the others.");
+		}
+
+		[Test]
+		public void StartIsDelayedForTheLastLoader()
+		{
+			// With a start delay, the first frame closes that long after the last client has finished loading
+			var s = new FrameScheduler(40, 3, 1, new[] { 0, 1 }, startDelay: 2000);
+			s.ReceivePacket(0, 1, Order, 0);
+			var before = 0;
+			for (var t = 0L; t < 3500; t += 10)
+			{
+				if (t == 1500)
+					s.ReceivePacket(1, 1, Order, t);
+				while (s.TryCloseFrame(t, out _, out _))
+					before++;
+			}
+
+			Assert.That(before, Is.EqualTo(0), "No frame should close within 2s of the last client loading.");
+			Assert.That(s.TryCloseFrame(3500, out _, out _), Is.True, "The first frame should close once the delay is over.");
 		}
 
 		[Test]

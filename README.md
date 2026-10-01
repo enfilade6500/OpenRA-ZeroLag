@@ -37,7 +37,7 @@ advance, so one bad connection produces game-wide freezes. On a ZeroLag server:
   it is unless the host enables that.
 - Type **`!speed`** in the chat to ask the current game speed, **`!quiet`** to hide the speed
   messages for yourself.
-- If the host enables it, type **`!kickslow`** to vote to kick whichever player the game
+- If the host enables it, type **`!kickslow`** (or just `kickslow`) to vote to kick whichever player the game
   is currently being slowed down for, without needing to know who it is. A majority of the
   players still in the game is needed; votes stand for as long as that player keeps the
   game slow, so they can be typed whenever each player gets fed up.
@@ -72,6 +72,7 @@ server. See [SERVER-INSTALL.md](SERVER-INSTALL.md) for a step-by-step version wi
 | `Server.MaxPlayerBuffer` | `1500` | Largest buffer (ms) built for a player whose connection drops out; costs only that player's own input delay. `0` disables it. |
 | `Server.MaxCatchUpSpeed` | `400` | Fastest speed (percent) a player far behind is asked to run at to catch up; players slightly behind are asked for much less. |
 | `Server.MaxWaitForStalledPlayer` | `3000` | Longest the game pauses (ms) for a player who stops responding, before continuing without them. `0` never pauses. |
+| `Server.StartDelay` | `2000` | Wait (ms) after the last player has finished loading before the game starts, so that player's graphics warm up like everyone else's did while they waited for them. `0` starts at once. |
 | `Server.AnnounceGameSpeed` | `True` | Chat messages when the game slows down and when it is back to full speed (at most one every 30 s); players can `!quiet` them. |
 | `Server.NameSlowestPlayer` | `False` | Name the player the game is slowed down for in those messages. |
 | `Server.VoteKickSlowest` | `False` | Enable the `!kickslow` vote. Also requires the stock `Server.EnableVoteKick`. |

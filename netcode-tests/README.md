@@ -48,10 +48,12 @@ Wi-Fi hiccup, looks like to the game). Byte order is always preserved, like TCP.
 | melo | the 14-player game from v1.1's first day: p4's PC fine, then ~60% for two minutes, then ~85%, then fine (run 420s) |
 | wander | a PC whose ceiling wanders between ~66% and ~92% for eight minutes (run 480s) |
 | nextslowest | p4 at ~60% and p3 at ~80%; p4 leaves after two minutes and p3's ceiling must be found gently (run 240s) |
+| offsethold | the stuck hold of v1.2 (NETCODE.md, v1.3): p4's PC is at ~70% for a minute and then fine, but hands frames to its game 600ms late while answering pings at once, so its lateness reads 600ms high (run 240s) |
 
-`tools/score12.py v11,v12` scores the last three (and the regression suite) per server build;
-`tools/policysim.py` is the one-second model of the control loop the v1.2 policy was chosen
-with (`--sweep` runs the variants, `--trace dip creep0.3` prints a timeline).
+`tools/score12.py v11,v12,v13` scores these (and the regression suite) per server build;
+`tools/policysim.py` is the one-second model of the control loop the v1.2 and v1.3 policies
+were chosen with (`--sweep` and `--trend-sweep` run the variants, `--trace dip v1.3` prints a
+timeline). `CpuSpec.ReceiveDelayMs` is the harness knob behind `offsethold`.
 
 ## Metrics (per client, after a 5s warm-up)
 

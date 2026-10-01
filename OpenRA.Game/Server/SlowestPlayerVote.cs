@@ -53,6 +53,19 @@ namespace OpenRA.Server
 			return Aliases.Contains(word);
 		}
 
+		/// <summary>
+		/// Whether a plain chat line is the vote command typed without its '!' ("kickslow", "kick slow"), which players do.
+		/// </summary>
+		public static bool IsBareCommand(string text)
+		{
+			var words = text.Trim().ToLowerInvariant().Split(' ', System.StringSplitOptions.RemoveEmptyEntries);
+			if (words.Length == 0)
+				return false;
+
+			var first = words[0] == "kick" && words.Length > 1 ? "kick" + words[1] : words[0];
+			return first != "ks" && Aliases.Contains("!" + first);
+		}
+
 		/// <summary>Whether a chat command looks like an attempt to kick someone by other means (so the player can be pointed at the vote).</summary>
 		public static bool LooksLikeKick(string command) => command.StartsWith("!kick", System.StringComparison.Ordinal) && !IsCommand(command);
 

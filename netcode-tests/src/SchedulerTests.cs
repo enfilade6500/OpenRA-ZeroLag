@@ -236,6 +236,10 @@ static class Tests
 		// before UpDeadUntil (and then everything queued arrives at once, like TCP after a retransmission)
 		public long DownDeadUntil;
 		public long UpDeadUntil;
+
+		// Extra one-way delay on the download side that the client's ping does not show (ms): the server then reads
+		// this client's lateness that much too high, like a client whose round trip is underestimated
+		public long ExtraDelay;
 		readonly Queue<int> outbox = new();
 		public float MinScale = 1f;
 		public int Stalls; // ticks the client wanted to take but had no frame for
@@ -282,7 +286,7 @@ static class Tests
 
 	static (List<string> Logs, FrameScheduler S, List<SimClient> Clients) RunWithCapacities(double[] capacities, long duration, int minGameSpeed,
 		Action<long, List<SimClient>, FrameScheduler> onSecond = null, int maxPlayerBuffer = 1500, int maxWait = 3000,
-		Action<FrameScheduler, long> onTick = null, int maxPlayerLag = 0)
+		Action<FrameScheduler, long> onTick = null, int maxPlayerLag = 3000, long[] extraDelays = null)
 	{
 		const int Timestep = 40, Interval = 3, First = 4, Delay = 20;
 		var logs = new List<string>();
@@ -291,6 +295,7 @@ static class Tests
 		var clients = indices.Select(i => new SimClient(i, capacities[i], Timestep, First)).ToList();
 		foreach (var c in clients)
 		{
+			c.ExtraDelay = extraDelays?[c.Index] ?? 0;
 			s.ReceivePing(c.Index, new[] { 2 * Delay }, 0);
 			for (var f = 1; f < First; f++)
 				s.ReceivePacket(c.Index, f, Order, 0); // the frames a client sends while the game is starting
@@ -300,7 +305,7 @@ static class Tests
 		{
 			while (s.TryCloseFrame(t, out var frame, out _))
 				foreach (var c in clients)
-					c.Inbox.Enqueue((frame, Math.Max(t, c.DownDeadUntil) + Delay));
+					c.Inbox.Enqueue((frame, Math.Max(t, c.DownDeadUntil) + Delay + c.ExtraDelay));
 
 			foreach (var c in clients)
 				c.Run(s, t, Timestep, Interval);
@@ -357,8 +362,9 @@ static class Tests
 
 	static void KickedSlowestPlayerSpeedsBackUp()
 	{
-		// P1 (80%) slows the game; at 30s P1 is kicked. Nobody else has been tested above 78% since, so the game
-		// does not jump to 100%: it speeds back up briskly from where it is, and is at full speed within 15s.
+		// P1 (80%) slows the game; at 30s P1 is kicked. Nobody else has been tested above the held speed (a few points
+		// under 80%) since, so the game does not jump to 100%: it speeds back up briskly from where it is, and is at
+		// full speed within 15s.
 		var speedAfterKick = new List<(long T, int Speed)>();
 		var (logs, s, clients) = RunWithCapacities(new[] { 2.0, 0.8, 2.0 }, 50000, 0, (t, cs, sched) =>
 		{
@@ -369,7 +375,7 @@ static class Tests
 		});
 
 		var speeds = speedAfterKick.Select(x => x.Speed).ToList();
-		Check(speeds[0] < 100 && speeds[0] >= 78, $"the game does not jump to full speed the second after the kick ({speeds[0]}%)");
+		Check(speeds[0] < 100 && speeds[0] >= 74, $"the game does not jump to full speed the second after the kick ({speeds[0]}%)");
 		Check(speeds.Zip(speeds.Skip(1), (a, b) => b >= a).All(x => x), $"the speed only rises after the kick ({string.Join(",", speeds.Take(12))})");
 		Check(speedAfterKick.First(x => x.Speed == 100).T - 30000 <= 15000, $"full speed within 15s of the kick ({(speedAfterKick.First(x => x.Speed == 100).T - 30000) / 1000}s)");
 		Check(logs.Any(l => l.Contains("P1 has left; speeding the game back up")), "the ramp is logged");
@@ -773,6 +779,60 @@ static class Tests
 		}
 	}
 
+	static void OffsetClientIsNotHeldForever()
+	{
+		// P1 manages 75% and its lateness reads 600 ms high (its round trip is longer than its ping says). After the
+		// slowdown the hold must still work, and when P1's computer recovers at 45 s the game must get back to full
+		// speed within 90 s. In v1.2 such a client was held at the measured speed for the rest of the game.
+		var fullAt = -1L;
+		var (logs, s, clients) = RunWithCapacities(new[] { 2.0, 0.75, 2.0 }, 150000, 0, (t, cs, sched) =>
+		{
+			if (t == 45000)
+				cs[1].Capacity = 2.0;
+			if (t > 45000 && fullAt < 0 && sched.SpeedPercent == 100)
+				fullAt = t;
+		}, maxPlayerLag: 3000, extraDelays: new long[] { 0, 600, 0 });
+
+		Check(logs.Any(l => l.StartsWith("Slowing the game", StringComparison.Ordinal) && l.Contains("P1")), "offset: P1 was slowed down for");
+		Check(fullAt > 0 && fullAt - 45000 <= 90000, $"offset: full speed within 90s of the recovery (at {fullAt})");
+		Check(s.SpeedPercent == 100, "offset: at full speed at the end");
+		Check(clients[0].NextFrame - clients[1].NextFrame < 20, "offset: P1 ended close to the others");
+	}
+
+	static void OffsetClientSettlesLikeAnyOther()
+	{
+		// P1 manages a steady 75% with a 600 ms lateness offset: the hold settles near 75% and probes only now and
+		// then, as it would for a client with no offset.
+		var speeds = new List<int>();
+		var (logs, _, clients) = RunWithCapacities(new[] { 2.0, 0.75, 2.0 }, 180000, 0, (t, cs, sched) =>
+		{
+			if (t >= 40000)
+				speeds.Add(sched.SpeedPercent);
+		}, maxPlayerLag: 3000, extraDelays: new long[] { 0, 600, 0 });
+
+		Check(logs.Count(l => l.StartsWith("Slowing the game", StringComparison.Ordinal)) <= 2, "offset steady: at most two slowdowns");
+		Check(logs.Count(l => l.StartsWith("Speeding the game up to", StringComparison.Ordinal)) <= 3, "offset steady: at most three failed probes in three minutes");
+		Check(speeds.Min() >= 66 && speeds.Max() <= 85, $"offset steady: speed stays within a few points of the ceiling ({speeds.Min()}-{speeds.Max()})");
+		Check(clients[0].NextFrame - clients[1].NextFrame < 20, "offset steady: P1 stays close to the others");
+	}
+
+	static void StartIsDelayedForTheLastLoader()
+	{
+		// With a start delay, the first frame closes that long after the last client has finished loading
+		var s = new FrameScheduler(40, 3, 1, new[] { 0, 1 }, startDelay: 2000);
+		s.ReceivePacket(0, 1, Order, 0);
+		var before = 0;
+		for (var t = 0L; t < 3500; t += 10)
+		{
+			if (t == 1500)
+				s.ReceivePacket(1, 1, Order, t);
+			before += Drain(s, t).Count;
+		}
+
+		Check(before == 0, "start delay: no frame closes within 2s of the last client loading");
+		Check(Drain(s, 3500).Count == 1, "start delay: the first frame closes once the delay is over");
+	}
+
 	static int Main()
 	{
 		FramesAreConsecutiveAndComplete();
@@ -803,6 +863,9 @@ static class Tests
 		AnnouncerIsNotChatty();
 		AnnouncerSkipsPartialRecoveries();
 		TickScalesAreValid();
+		OffsetClientIsNotHeldForever();
+		OffsetClientSettlesLikeAnyOther();
+		StartIsDelayedForTheLastLoader();
 		Console.WriteLine(failures == 0 ? "\nALL TESTS PASSED" : $"\n{failures} TEST(S) FAILED");
 		return failures == 0 ? 0 : 1;
 	}

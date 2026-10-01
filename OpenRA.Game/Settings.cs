@@ -134,6 +134,11 @@ namespace OpenRA
 			"the player has been silent for a few seconds. 0 never pauses the game for anyone.")]
 		public int MaxWaitForStalledPlayer = 3000;
 
+		[Desc("Multiplayer games: how long (in milliseconds) the game waits after the last player has finished loading before " +
+			"it starts. The players who loaded first have been drawing the frozen map meanwhile, which gets their graphics " +
+			"warmed up; this gives the last one the same chance, instead of their first seconds counting as a slow computer.")]
+		public int StartDelay = 2000;
+
 		[Desc("Multiplayer games: tell the players in the game chat when the game is slowed down for a slow computer " +
 			"and when it is back to full speed (at most one message every 30 seconds). The player concerned is told " +
 			"privately; the others are not told who it is unless NameSlowestPlayer is set. Players can ask with !speed.")]

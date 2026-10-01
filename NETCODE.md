@@ -115,9 +115,10 @@ edge.
 | `Server.MaxPlayerBuffer` | `1500` | Largest buffer (ms) built for a player whose connection drops out. `0` disables adaptive buffering. |
 | `Server.MaxCatchUpSpeed` | `400` | Fastest speed (percent) a client far behind is asked to run at. |
 | `Server.MaxWaitForStalledPlayer` | `3000` | Longest pause (ms) for a player who stops responding, then the game continues without them. `0` never pauses. |
+| `Server.StartDelay` | `2000` | Wait (ms) after the last player has loaded before the first frame, so their graphics warm up like everyone else's did during the freeze (v1.3). `0` starts at once. |
 | `Server.AnnounceGameSpeed` | `True` | Tell players in the chat when the game slows down and when it is back to full speed (rate-limited). The slow player is told privately. `!speed` always works; `!quiet` hides the messages for that player. |
 | `Server.NameSlowestPlayer` | `False` | Name the player the game is slowed down for in the public chat messages and in `!speed` replies. |
-| `Server.VoteKickSlowest` | `False` | Players can type `!kickslow` to vote to kick whoever the game is currently slowed down for. Needs `EnableVoteKick` (stock, default on). |
+| `Server.VoteKickSlowest` | `False` | Players can type `!kickslow` (or `kickslow`) to vote to kick whoever the game is currently slowed down for. Needs `EnableVoteKick` (stock, default on). |
 
 ## Compatibility
 
@@ -418,6 +419,83 @@ time, probe rates, trigger horizon) are at the top of `FrameScheduler.cs` with t
 reasons; the model in `policysim.py` is how to check a change to them (`--sweep` runs the
 variants), and the harness scenarios `melo`, `wander` and `nextslowest` are the same
 situations against the real client timing.
+
+## v1.3: the hold reads frames, and a breath before the start
+
+### Findings
+
+v1.2's first two days (71 games across both servers, with every replay) did what the model
+said: episodes of about a minute instead of three, probes within a minute of a slowdown,
+reverts landing on the measured speed, the slow player held about a second behind instead
+of three (median 1.1 s against 2.2 s; 9% of their lag reports over 2 s against 54%), and a
+quarter as many other players reported behind during slowdowns. Two games showed the
+hold's one blind spot:
+
+- **A constant offset in the lateness measure held a game at 67% for 17 minutes.** EU 1235,
+  1 Oct, five players: the slowest loader was slowed to 67% seven seconds into the game,
+  while his first frames were still loading, and the game never came back up until he left.
+  The replay shows him running a steady 3–5 net frames behind the frontier for all of those
+  minutes — healthy players sit at 2 — a fixed 0.3–0.9 s that never grew. He was keeping up
+  at 67%, and would have at 100%. The creeping hold read lateness *level*: anything over
+  100 ms pulled the speed back, anything over 200 ms reset the probe timer, so a client
+  with a constant offset (a round trip its ping understates, or a client that hands frames
+  to its game a little late) was held at the measured speed indefinitely. v1.1 would have
+  probed; its gate was "within 1.5 s". The model had no such offsets; with a 600 ms offset
+  added (`offset*` scenarios in `policysim.py`) it reproduces the stuck hold exactly.
+- **A volatile PC produced a probe every 85 s for half an hour.** EU 1234, 1 Oct, seven
+  players: a PC that kept up with probes to 85–90% and fell behind at 60–70% a minute later
+  was followed up and down 22 times. That is the design working on an input it cannot
+  predict; a back-off after repeated failures would trade speed for consistency, and the
+  decision was to live with it. Two players typed `kickslow` without the `!`.
+- **The start.** The clock starts when the last client has loaded (as in stock); that client
+  then pays its render warm-up (texture uploads, the map's vertex buffers) on live frames,
+  while the players who waited did theirs during the freeze. Across 640 client-games 6% of
+  clients fell 1.2 s or more behind in the first 30 s, almost always the slowest loader,
+  and 8 of 129 logged games had a slowdown in the first 30 s.
+
+### Changes
+
+1. *The hold reads the backlog in frames.* Each control interval the scheduler notes how
+   many frames it has closed beyond the last one each client reported; the fewest ever seen
+   for a client is the frames in flight on its connection, and the backlog is what is above
+   that. A constant in the lateness measure cannot reach it. The creep (0.3 points a second)
+   runs while the backlog is at most 2 frames and not growing faster than 5% of the frames
+   closed per second (or half a frame a second, since the lag is sampled to the frame);
+   faster growth pulls the speed back by the deficit, and a backlog above 4 frames by 0.3
+   points a second per frame, within the same ±1 point a second and 6% floor as before. The
+   probe timer counts the same conditions and is reset by growth or a large backlog. A probe
+   fails when the probed player's backlog reaches 3 frames having grown by 2 over the last
+   three intervals (also offset-free). The lateness measure still decides *slowdowns* (the
+   budget, the projected-lag trigger), where an offset only makes the server a little more
+   cautious. In the model, with the offsets added, v1.2 was stuck for 263 s of a 20-minute
+   `offsetdip` and 273 s of `offsethi` (speed lost 32% in both); v1.3 is stuck 25 s and loses
+   12%, the same as the dip without an offset. On the scenarios without offsets the two are
+   equal to the point on speed lost (dip 12%, wander 23%, spiky 24%, steady 25%, two slow
+   31%) and on speed changes (36 against 38 an hour); v1.3 lets the slow player sit a little
+   further behind (0.52 s against 0.39 s on average), because the lateness level was what the
+   old rule drained and the backlog rule only drains above four frames. With four times the
+   measurement noise the numbers do not move.
+   The harness scenario `offsethold` (a client whose packets are handed to its game 600 ms
+   late while its pings are answered at once) shows v1.2 holding 66% to the end and v1.3
+   back at full speed 77 s after the slowdown.
+2. *Start delay.* `Server.StartDelay` (default 2000 ms): the first frame closes that long
+   after the last client's first packet, so the last loader renders the frozen map for a
+   couple of seconds like everyone else did before the clock starts. It costs every start
+   two seconds inside a freeze of usually five to ten; it removes the commonest start-of-game
+   slowdown, which was the one at second seven.
+3. *`kickslow` without the `!`* counts as the vote (as do `kick slow` and the aliases),
+   and the line is still relayed as chat since that is how it was typed.
+4. The private message to the player the game is slowed for now says what to try: turn off
+   VSync and limit the frame rate in Settings > Display, and close other programs to free up
+   the CPU. (On a 60 Hz screen, VSync alone costs a client that is over budget about 8 ms
+   per tick, because the client renders a frame after every logic tick and the swap waits
+   for the monitor.)
+
+The lateness-level constants (CreepGain, CreepDeadband) are gone; the frame-backlog ones
+(CreepBacklog, CreepPullBacklog, CreepDeficitDeadband, CreepGrowthFloor, CreepDeficitGain,
+CreepLevelGain, ProbeFailureBacklog, ProbeFailureGrowth) are at the top of
+`FrameScheduler.cs`. With a lag budget below the usual three seconds the backlog thresholds
+shrink in proportion.
 
 ## Testing
 

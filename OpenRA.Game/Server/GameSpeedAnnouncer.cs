@@ -176,7 +176,8 @@ namespace OpenRA.Server
 				return Announce(now, message);
 
 			return Announce(now, message,
-				$"The game has been slowed to {speedPercent}% because your computer can't keep up. Closing other programs or lowering the graphics settings may help.",
+				$"The game has been slowed to {speedPercent}% because your computer can't keep up. Try: turn off VSync and limit the frame rate " +
+				"(Settings > Display), and close other programs to free up the CPU.",
 				slowestPlayer.Value);
 		}
 

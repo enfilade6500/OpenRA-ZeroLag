@@ -221,6 +221,13 @@ namespace NetHarness
 				return new() { Good("p1"), Good("p2"), Good("p3"), p4 };
 			}),
 
+			["offsethold"] = ("the 'super maq' case (1 Oct 2026): p4's PC manages ~70% for the first 60s, then is fine, but its lateness reads 600ms high (a round trip its ping does not show); the game must not stay held at 70% (run 240s)", () =>
+			{
+				var p4 = Good("p4");
+				p4.Cpu = new CpuSpec { Schedule = "0:57,55:57,65:30", ReceiveDelayMs = 600 };
+				return new() { Good("p1"), Good("p2"), Good("p3"), p4 };
+			}),
+
 			["wander"] = ("the 'K$' case: p4's PC wanders between ~66% and ~92% on a minute-and-a-half timescale for eight minutes (run 480s)", () =>
 			{
 				var p4 = Good("p4");

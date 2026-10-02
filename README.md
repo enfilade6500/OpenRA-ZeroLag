@@ -33,8 +33,9 @@ advance, so one bad connection produces game-wide freezes. On a ZeroLag server:
   default: a computer that needs less is left behind, like a spectator, and catches back up
   at turbo speed if its load drops. Above that it is the players' call. The chat says so —
   *"Slowing the game to 78% so that the slowest computer can keep up."* — and says when it
-  is back to full speed. The player concerned is told privately; the others are not told who
-  it is unless the host enables that.
+  is back to full speed. The player concerned is told privately, by name, with the two
+  display settings to change, and given the all-clear when they are keeping up again; the
+  others are not told who it is unless the host enables that.
 - Type **`!speed`** in the chat to ask the current game speed, **`!quiet`** to hide the speed
   messages for yourself.
 - If the host enables it, type **`!kickslow`** (or just `kickslow`) to vote to kick whichever player the game

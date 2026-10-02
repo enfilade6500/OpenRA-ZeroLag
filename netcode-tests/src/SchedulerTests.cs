@@ -678,11 +678,14 @@ static class Tests
 	{
 		var a = new GameSpeedAnnouncer(false, "Type !kickslow to vote.", i => $"P{i}");
 		var messages = new List<(long T, string M)>();
+		var privateLines = new List<(long T, int Client, string M)>();
 		void Step(long t, int speed, int? slowest = null)
 		{
-			var m = a.Tick(t, speed, slowest, 0, -1, 10);
-			if (m != null)
+			var m = a.Tick(t, speed, slowest, 0, -1, 10, slowest.HasValue ? speed + 2 : 0);
+			if (m?.Message != null)
 				messages.Add((t, m.Value.Message));
+			if (m?.PrivateMessage != null)
+				privateLines.Add((t, m.Value.PrivateClient, m.Value.PrivateMessage));
 		}
 
 		// Full speed for a minute: silence
@@ -694,16 +697,25 @@ static class Tests
 		Step(60000, 85, 1);
 		Check(messages.Count == 1 && messages[0].M.StartsWith("Slowing the game to 85%") && !messages[0].M.Contains("P1") && messages[0].M.Contains("!kickslow"),
 			"the first slowdown is announced immediately, without naming the player: " + (messages.Count > 0 ? messages[0].M : ""));
+		Check(privateLines.Count == 0, "the private line does not go out in the same instant as the public one");
 
 		// Drifting 85 -> 80 -> 78 -> 82 over the next 25s: nothing new (small changes, too soon)
 		var drift = new[] { 84, 82, 80, 79, 78, 78, 80, 82, 82, 81, 80, 79, 78, 78, 78, 79, 80, 81, 82, 82, 82, 82, 82, 82 };
 		for (var i = 0; i < drift.Length; i++)
 			Step(61000 + i * 1000, drift[i], 1);
 		Check(messages.Count == 1, $"small drifts are not announced ({messages.Count} messages)");
+		Check(privateLines.Count == 1 && privateLines[0].Client == 1 && privateLines[0].T >= 62000 && privateLines[0].T <= 64000
+			&& privateLines[0].M.StartsWith(">>> P1, THIS IS ABOUT YOU: the game is slowed to 85%") && privateLines[0].M.Contains("managing about 87%")
+			&& privateLines[0].M.Contains("\"Enable VSync\"") && privateLines[0].M.Contains("\"Limit framerate to game tick rate\"") && !privateLines[0].M.Contains("60 Hz"),
+			"the private line follows a couple of seconds later, flagged with the player's name in capitals, their measured speed and the settings to change: "
+			+ (privateLines.Count > 0 ? privateLines[0].M : "(none)"));
 
 		// Down to 70% at t=90s (30s after the first message, 15 points lower): announced
 		Step(90000, 70, 1);
 		Check(messages.Count == 2 && messages[1].M.StartsWith("Slowing the game to 70%"), "a large further slowdown is announced once the interval has passed");
+		Step(93000, 70, 1);
+		Check(privateLines.Count == 2 && privateLines[1].M.Contains("slowed to 70%") && !privateLines.Any(l => l.M.Contains("keeping up again")),
+			"a further slowdown for the same player brings a new private line and no all-clear");
 
 		// Flapping between 100% and 90% every 5s for a minute: at most one message per 30s, never "back to full speed"
 		var before = messages.Count;
@@ -717,27 +729,48 @@ static class Tests
 		for (long t = 151000; t < 300000; t += 1000)
 			Step(t, 100);
 		Check(messages.Count == lastBefore + 1 && messages.Last().M == "The game is back to full speed.", $"sustained full speed is announced exactly once ({messages.Count - lastBefore})");
+		var allClear = privateLines.Where(l => l.T > 151000).ToList();
+		Check(allClear.Count == 1 && allClear[0].Client == 1 && allClear[0].M == ">>> P1: your computer is keeping up again."
+			&& allClear[0].T > messages.Last().T && allClear[0].T <= messages.Last().T + 4000,
+			"the player told is given the all-clear once, shortly after full speed is announced: " + string.Join(" | ", allClear.Select(l => l.M)));
 
 		// When the slowest player is kicked, the return to full speed is announced at once, rate limit or not
 		var kick = new GameSpeedAnnouncer(false, null, i => $"P{i}");
 		kick.Tick(0, 80, 1, 0, -1, 10);
+		Check(kick.Tick(3000, 80, 1, 0, -1, 10)?.PrivateClient == 1, "precondition: the private line has gone out");
 		Check(kick.Tick(5000, 80, 1, 0, -1, 10) == null, "precondition: within the rate limit nothing is said");
 		kick.SlowestPlayerGone();
 		var afterKick = kick.Tick(6000, 100, null, 0, -1, 10);
 		Check(afterKick != null && afterKick.Value.Message == "The game is back to full speed.", "full speed is announced immediately after the slowest player is kicked");
 		Check(kick.Tick(7000, 100, null, 0, -1, 10) == null, "...and only once");
 
-		// With naming on, the message names the player
-		var named = new GameSpeedAnnouncer(true, null, i => $"P{i}");
-		var m1 = named.Tick(0, 80, 1, 0, -1, 10);
-		Check(m1 != null && m1.Value.Message.Contains("P1's computer") && m1.Value.PrivateClient == 1 && m1.Value.PrivateMessage.Contains("your computer"),
-			"naming option names the player publicly and tells them privately");
+		// With naming on, the message names the player; at a fast game speed the private advice mentions VSync and the monitor
+		var named = new GameSpeedAnnouncer(true, null, i => $"P{i}", fastGameSpeed: true);
+		var m1 = named.Tick(0, 80, 1, 0, -1, 10, 82);
+		Check(m1 != null && m1.Value.Message.Contains("P1's computer") && m1.Value.PrivateMessage == null,
+			"naming option names the player publicly; the private line follows on its own");
+		var pm = named.Tick(3000, 80, 1, 0, -1, 10, 82);
+		Check(pm != null && pm.Value.Message == null && pm.Value.PrivateClient == 1 && pm.Value.PrivateMessage.StartsWith(">>> P1, THIS IS ABOUT YOU:")
+			&& pm.Value.PrivateMessage.Contains("At this game speed, VSync alone causes this on a 60 Hz monitor."),
+			"at a fast game speed the private line says that VSync alone does it: " + (pm?.PrivateMessage ?? "(none)"));
+
+		// The slowest player changes while the game is slow: the first gets the all-clear, the second the flag
+		var m3 = named.Tick(40000, 70, 2, 0, -1, 10, 72);
+		Check(m3 != null && m3.Value.Message.Contains("P2's computer"), "a slowdown for another player is announced");
+		var l1 = named.Tick(43000, 70, 2, 0, -1, 10, 72);
+		var l2 = named.Tick(44000, 70, 2, 0, -1, 10, 72);
+		Check(l1?.PrivateClient == 1 && l1.Value.PrivateMessage == ">>> P1: your computer is keeping up again." && l2?.PrivateClient == 2 && l2.Value.PrivateMessage.StartsWith(">>> P2, THIS IS ABOUT YOU:"),
+			"the player told before gets the all-clear and the new one the flag: " + (l1?.PrivateMessage ?? "(none)") + " / " + (l2?.PrivateMessage ?? "(none)"));
+		Check(named.Tick(45000, 70, 2, 0, -1, 10, 72) == null, "...and nothing more");
 
 		// A player left behind by the speed floor is announced
 		var floor = new GameSpeedAnnouncer(false, null, i => $"P{i}");
 		var m2 = floor.Tick(0, 100, null, 1, 2, 75);
-		Check(m2 != null && m2.Value.Message.Contains("75%") && !m2.Value.Message.Contains("P2") && m2.Value.PrivateClient == 2,
-			"a player falling behind on their own is announced without a name, and told privately");
+		Check(m2 != null && m2.Value.Message.Contains("75%") && !m2.Value.Message.Contains("P2") && m2.Value.PrivateMessage == null,
+			"a player falling behind on their own is announced without a name");
+		var f2 = floor.Tick(3000, 100, null, 1, 2, 75);
+		Check(f2?.PrivateClient == 2 && f2.Value.PrivateMessage.StartsWith(">>> P2, THIS IS ABOUT YOU: your computer can't keep up with the game even at 75%"),
+			"...and told privately, flagged: " + (f2?.PrivateMessage ?? "(none)"));
 	}
 
 	static void AnnouncerSkipsPartialRecoveries()
@@ -745,15 +778,19 @@ static class Tests
 		var a = new GameSpeedAnnouncer(false, null, i => $"P{i}");
 		Check(a.Tick(0, 100, null, 0, -1, 10) == null, "quiet at full speed");
 		Check(a.Tick(1000, 60, 1, 0, -1, 10)?.Message.StartsWith("Slowing the game to 60%") == true, "the slowdown is announced");
+		Check(a.Tick(4000, 60, 1, 0, -1, 10)?.PrivateClient == 1, "the private line follows");
 		Check(a.Tick(40000, 90, 1, 0, -1, 10) == null, "a partial recovery (60% -> 90%) is not announced");
 		var again = a.Tick(80000, 78, 1, 0, -1, 10);
 		Check(again?.Message.StartsWith("Slowing the game to 78%") == true, "a slowdown from the quiet peak (90% -> 78%) is announced: " + (again?.Message ?? "(nothing)"));
+		Check(a.Tick(83000, 78, 1, 0, -1, 10)?.PrivateMessage.Contains("slowed to 78%") == true, "the private line follows again");
 		Check(a.Tick(120000, 100, null, 0, -1, 10) == null, "full speed waits for the settle time");
 		Check(a.Tick(131000, 100, null, 0, -1, 10)?.Message == "The game is back to full speed.", "full speed is announced once settled");
 		a.ContinuedWithout(2);
 		var cont = a.Tick(132000, 100, null, 0, -1, 10);
 		Check(cont?.Message.StartsWith("P2 has stopped responding; the game continues without them") == true, "continuing without a stopped player is announced at once: " + (cont?.Message ?? "(nothing)"));
 		Check(a.Tick(133000, 100, null, 0, -1, 10) == null, "...and only once");
+		Check(a.Tick(134000, 100, null, 0, -1, 10)?.PrivateMessage == ">>> P1: your computer is keeping up again.", "the all-clear follows full speed");
+		Check(a.Tick(135000, 100, null, 0, -1, 10) == null, "...and that is all");
 	}
 
 	static void TickScalesAreValid()

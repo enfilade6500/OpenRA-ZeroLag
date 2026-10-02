@@ -60,9 +60,12 @@ player's computer* below).
 **6. Game chat.** Players are told when the game is slowed down and when it is back to
 full speed — "Slowing the game to 78% so that the slowest computer can keep up." — at
 most one message every 30 seconds, and only for changes of 10 points or more, so a long
-game does not fill the chat. The player concerned is told privately ("The game has been
-slowed to 78% because your computer can't keep up..."); by default nobody else is told
-who it is. Anyone can type `!speed` to ask. Two options, both off by default:
+game does not fill the chat. The player concerned is told privately, a couple of seconds
+later so that the line stands on its own, flagged with their own name (">>> NAME, THIS IS
+ABOUT YOU: the game is slowed to 78% because your computer is not keeping up (it is
+managing about 80%). Settings > Display: untick "Enable VSync", tick "Limit framerate to
+game tick rate"; close other programs."), and given the all-clear when the game is no
+longer slowed for them; by default nobody else is told who it is. Anyone can type `!speed` to ask. Two options, both off by default:
 `Server.NameSlowestPlayer` names the player in the public messages, and
 `Server.VoteKickSlowest` lets players type `!kickslow` to vote to kick whoever the game
 is currently slowed down for, without needing to know who it is (same majority, timeout
@@ -496,6 +499,46 @@ The lateness-level constants (CreepGain, CreepDeadband) are gone; the frame-back
 CreepLevelGain, ProbeFailureBacklog, ProbeFailureGrowth) are at the top of
 `FrameScheduler.cs`. With a lag budget below the usual three seconds the backlog thresholds
 shrink in proportion.
+
+## v1.3.1: the private line
+
+### Finding
+
+On 1 Oct the author's own game (six players, game speed *faster*) was slowed to 67% for
+him for five minutes on a PC with a GeForce 1080 Ti, and he did not notice the private
+message: it arrived in the same instant as the public speed line, in the same "Battlefield
+Control" colour, and he had learnt to ignore those. He noticed the input delay instead,
+turned off VSync, ticked "Limit framerate to game tick rate", and the game came back.
+
+The mechanism is the one the client benchmark predicted, sharpened by the game speed. At
+*faster* a tick is 30 ms. With VSync on a 60 Hz monitor the frame hand-off after every tick
+waits for the next refresh, so a tick that does not fit in one refresh period costs 33.3 ms
+and one that spills past that costs 50: the ceiling is 90% and busy stretches read as
+60–85%. The server measured 87, 84, 78 and 69% for him and the same ladder for the other
+player it slowed for in that game. At normal speed 33.3 ms fits in the 40 ms budget and the
+effect is invisible, which is why a strong PC only meets it at *faster* or *fastest*.
+
+A server has no control over how a line looks: everything it sends is a system line in the
+client's system colour, and the chat sound plays for every line already. It controls the
+words and the timing.
+
+### Changes
+
+1. The private line opens with the player's own name in capitals, the one word that cuts
+   through: `>>> ENFILADE, THIS IS ABOUT YOU: the game is slowed to 84% because your computer
+   is not keeping up (it is managing about 87%).`
+2. It is sent 2.5 s after the public line it belongs to, so it is a line of its own with its
+   own sound instead of blending into the speed message everyone gets at the same moment.
+3. When the game is no longer slowed for that player (back to full speed, or slowed for
+   someone else) they get one private all-clear, `>>> ENFILADE: your computer is keeping up
+   again.`, so a player who just changed a setting knows it worked.
+4. The advice names the two checkboxes: `Settings > Display: untick "Enable VSync", tick
+   "Limit framerate to game tick rate"; close other programs.` At game speeds above normal
+   it adds `At this game speed, VSync alone causes this on a 60 Hz monitor.`
+
+There is deliberately no repetition while the slowdown lasts: one line when it starts, one
+when it ends. (`GameSpeedAnnouncer.PrivateDelay`; the announcer's public rate limit does not
+apply to the private lines, which are tied to a public line already sent.)
 
 ## Testing
 

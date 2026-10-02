@@ -1060,7 +1060,8 @@ namespace OpenRA.Server
 
 			var slowest = frameScheduler.SlowestPlayer;
 			var announcement = speedAnnouncer.Tick(Game.RunTime, frameScheduler.SpeedPercent, slowest?.Client,
-				frameScheduler.TooSlowPlayers.Count(), frameScheduler.LastTooSlowPlayer, frameScheduler.MinSpeedPercent);
+				frameScheduler.TooSlowPlayers.Count(), frameScheduler.LastTooSlowPlayer, frameScheduler.MinSpeedPercent,
+				slowest.HasValue ? (int)Math.Round(slowest.Value.Speed * 100) : 0);
 			if (announcement == null)
 				return;
 
@@ -1672,7 +1673,8 @@ namespace OpenRA.Server
 
 					if (Settings.AnnounceGameSpeed)
 						speedAnnouncer = new GameSpeedAnnouncer(Settings.NameSlowestPlayer,
-							voteKickSlowest ? $"Type {SlowestPlayerVote.Command} to vote to kick the slowest player." : null, DescribeClient);
+							voteKickSlowest ? $"Type {SlowestPlayerVote.Command} to vote to kick the slowest player." : null, DescribeClient,
+							gameSpeed.Timestep < 40);
 				}
 			}
 		}

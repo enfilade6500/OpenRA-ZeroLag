@@ -31,6 +31,10 @@ namespace OpenRA.Server
 		// Full speed is announced only once it has lasted this long (ms), so a brief recovery makes no noise
 		const int FullSpeedSettleTime = 10000;
 
+		// A private line follows the public one it belongs to by this much (ms), so that it arrives as a line of its
+		// own, with its own chat sound, instead of blending into the speed message everyone gets at the same moment
+		const int PrivateDelay = 2500;
+
 		public readonly struct Announcement
 		{
 			/// <summary>The message for everyone.</summary>
@@ -49,8 +53,14 @@ namespace OpenRA.Server
 		}
 
 		readonly bool namePlayer;
+		readonly bool fastGameSpeed;
 		readonly string voteHint;
 		readonly Func<int, string> describeClient;
+
+		// The player last told privately that the game is slowed down for them (-1: nobody), and the private lines
+		// waiting to be sent
+		int toldClient = -1;
+		readonly Queue<(long Due, int Client, string Text)> pendingPrivate = new();
 
 		int lastAnnouncedSpeed = 100;
 		int fastestSinceAnnounce = 100;
@@ -80,11 +90,14 @@ namespace OpenRA.Server
 		/// <param name="namePlayer">Name the player the game is slowed down for. Otherwise they are only told privately.</param>
 		/// <param name="voteHint">Appended to slowdown messages (e.g. how to vote to kick the slowest player), or null.</param>
 		/// <param name="describeClient">Returns a player's name.</param>
-		public GameSpeedAnnouncer(bool namePlayer, string voteHint, Func<int, string> describeClient)
+		/// <param name="fastGameSpeed">The game runs at a speed above normal (a timestep under 40 ms), where VSync alone
+		/// holds a 60 Hz client under 100%; the private advice says so.</param>
+		public GameSpeedAnnouncer(bool namePlayer, string voteHint, Func<int, string> describeClient, bool fastGameSpeed = false)
 		{
 			this.namePlayer = namePlayer;
 			this.voteHint = string.IsNullOrEmpty(voteHint) ? "" : " " + voteHint;
 			this.describeClient = describeClient ?? (c => $"client {c}");
+			this.fastGameSpeed = fastGameSpeed;
 		}
 
 		/// <summary>
@@ -96,8 +109,18 @@ namespace OpenRA.Server
 		/// <param name="tooSlowCount">Players who would need the game slower than the floor and are falling behind on their own.</param>
 		/// <param name="lastTooSlowPlayer">The most recent such player, for the message.</param>
 		/// <param name="minSpeedPercent">The floor the game is never slowed below.</param>
-		public Announcement? Tick(long now, int speedPercent, int? slowestPlayer, int tooSlowCount, int lastTooSlowPlayer, int minSpeedPercent)
+		/// <param name="slowestSpeedPercent">What the slowest player's computer was measured managing, as a percentage of
+		/// normal speed (0: unknown), for their private message.</param>
+		public Announcement? Tick(long now, int speedPercent, int? slowestPlayer, int tooSlowCount, int lastTooSlowPlayer, int minSpeedPercent,
+			int slowestSpeedPercent = 0)
 		{
+			// A private line whose moment has come goes out on its own, outside the rate limit on public messages
+			if (pendingPrivate.Count > 0 && now >= pendingPrivate.Peek().Due)
+			{
+				var (_, client, text) = pendingPrivate.Dequeue();
+				return new Announcement(null, text, client);
+			}
+
 			if (speedPercent >= 100)
 			{
 				if (fullSpeedSince < 0)
@@ -118,6 +141,7 @@ namespace OpenRA.Server
 					if (speedPercent >= 100)
 					{
 						lastAnnouncedSpeed = fastestSinceAnnounce = 100;
+						AllClear(now);
 						return Announce(now, "The game is back to full speed.");
 					}
 
@@ -145,10 +169,11 @@ namespace OpenRA.Server
 			{
 				announcedTooSlow = tooSlowCount;
 				var who = namePlayer ? $"{describeClient(lastTooSlowPlayer)}'s computer" : "The slowest computer";
+				TellPrivately(now, lastTooSlowPlayer,
+					$"{Flag(lastTooSlowPlayer)} your computer can't keep up with the game even at {minSpeedPercent}% speed, " +
+					$"so the game will not be slowed down any further for you.{Advice}");
 				return Announce(now,
-					$"{who} can't keep up even at {minSpeedPercent}% speed, so the game will not be slowed down any further and that player will fall behind on their own.",
-					$"Your computer can't keep up with the game even at {minSpeedPercent}% speed. The game will not be slowed down any further for you.",
-					lastTooSlowPlayer);
+					$"{who} can't keep up even at {minSpeedPercent}% speed, so the game will not be slowed down any further and that player will fall behind on their own.");
 			}
 
 			if (speedPercent >= 100)
@@ -157,6 +182,7 @@ namespace OpenRA.Server
 					return null;
 
 				lastAnnouncedSpeed = fastestSinceAnnounce = 100;
+				AllClear(now);
 				return Announce(now, "The game is back to full speed.");
 			}
 
@@ -175,17 +201,44 @@ namespace OpenRA.Server
 			if (!slowestPlayer.HasValue)
 				return Announce(now, message);
 
-			return Announce(now, message,
-				$"The game has been slowed to {speedPercent}% because your computer can't keep up. Try: turn off VSync and limit the frame rate " +
-				"(Settings > Display), and close other programs to free up the CPU.",
-				slowestPlayer.Value);
+			var managing = slowestSpeedPercent > 0 ? $" (it is managing about {slowestSpeedPercent}%)" : "";
+			TellPrivately(now, slowestPlayer.Value,
+				$"{Flag(slowestPlayer.Value)} the game is slowed to {speedPercent}% because your computer is not keeping up{managing}.{Advice}");
+			return Announce(now, message);
 		}
 
-		Announcement Announce(long now, string message, string privateMessage = null, int privateClient = -1)
+		/// <summary>The opening of a private line: the player's own name, in capitals, is the one word that cuts through.</summary>
+		string Flag(int client) => $">>> {describeClient(client).ToUpperInvariant()}, THIS IS ABOUT YOU:";
+
+		string Advice =>
+			(fastGameSpeed ? " At this game speed, VSync alone causes this on a 60 Hz monitor." : "") +
+			" Settings > Display: untick \"Enable VSync\", tick \"Limit framerate to game tick rate\"; close other programs.";
+
+		/// <summary>Queues a private line for the player the game is slowed down for; the player told before, if another, gets the all-clear.</summary>
+		void TellPrivately(long now, int client, string text)
+		{
+			if (toldClient >= 0 && toldClient != client)
+				AllClear(now);
+
+			toldClient = client;
+			pendingPrivate.Enqueue((now + PrivateDelay, client, text));
+		}
+
+		/// <summary>Tells the player last told that the game is no longer slowed down for them, so they know a change they made worked.</summary>
+		void AllClear(long now)
+		{
+			if (toldClient < 0)
+				return;
+
+			pendingPrivate.Enqueue((now + PrivateDelay, toldClient, $">>> {describeClient(toldClient).ToUpperInvariant()}: your computer is keeping up again."));
+			toldClient = -1;
+		}
+
+		Announcement Announce(long now, string message)
 		{
 			announced = true;
 			lastAnnounceTime = now;
-			return new Announcement(message, privateMessage, privateClient);
+			return new Announcement(message);
 		}
 	}
 }

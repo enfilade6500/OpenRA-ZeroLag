@@ -792,11 +792,14 @@ namespace OpenRA.Test
 		{
 			var a = new GameSpeedAnnouncer(false, "Type !kickslow to vote.", i => $"P{i}");
 			var messages = new List<(long T, string M)>();
+			var privateLines = new List<(long T, int Client, string M)>();
 			void Step(long t, int speed, int? slowest = null)
 			{
-				var m = a.Tick(t, speed, slowest, 0, -1, 10);
-				if (m != null)
+				var m = a.Tick(t, speed, slowest, 0, -1, 10, slowest.HasValue ? speed + 2 : 0);
+				if (m?.Message != null)
 					messages.Add((t, m.Value.Message));
+				if (m?.PrivateMessage != null)
+					privateLines.Add((t, m.Value.PrivateClient, m.Value.PrivateMessage));
 			}
 
 			for (long t = 0; t < 60000; t += 1000)
@@ -806,15 +809,25 @@ namespace OpenRA.Test
 			Step(60000, 85, 1);
 			Assert.That(messages, Has.Count.EqualTo(1), "The first slowdown should be announced immediately.");
 			Assert.That(messages[0].M, Does.StartWith("Slowing the game to 85%").And.Not.Contain("P1").And.Contain("!kickslow"));
+			Assert.That(privateLines, Is.Empty, "The private line should not go out in the same instant as the public one.");
 
 			var drift = new[] { 84, 82, 80, 79, 78, 78, 80, 82, 82, 81, 80, 79, 78, 78, 78, 79, 80, 81, 82, 82, 82, 82, 82, 82 };
 			for (var i = 0; i < drift.Length; i++)
 				Step(61000 + i * 1000, drift[i], 1);
 			Assert.That(messages, Has.Count.EqualTo(1), "Small drifts should not be announced.");
+			Assert.That(privateLines, Has.Count.EqualTo(1), "The private line should follow the public one.");
+			Assert.That(privateLines[0].Client, Is.EqualTo(1));
+			Assert.That(privateLines[0].T, Is.InRange(62000, 64000), "The private line should follow a couple of seconds later.");
+			Assert.That(privateLines[0].M, Does.StartWith(">>> P1, THIS IS ABOUT YOU: the game is slowed to 85%")
+				.And.Contain("managing about 87%").And.Contain("\"Enable VSync\"").And.Contain("\"Limit framerate to game tick rate\"").And.Not.Contain("60 Hz"));
 
 			Step(90000, 70, 1);
 			Assert.That(messages, Has.Count.EqualTo(2), "A large further slowdown should be announced once the interval has passed.");
 			Assert.That(messages[1].M, Does.StartWith("Slowing the game to 70%"));
+			Step(93000, 70, 1);
+			Assert.That(privateLines, Has.Count.EqualTo(2), "A further slowdown for the same player should bring a new private line.");
+			Assert.That(privateLines[1].M, Does.Contain("slowed to 70%"));
+			Assert.That(privateLines.Any(l => l.M.Contains("keeping up again")), Is.False, "...and no all-clear.");
 
 			var before = messages.Count;
 			for (long t = 91000; t < 151000; t += 1000)
@@ -827,9 +840,16 @@ namespace OpenRA.Test
 				Step(t, 100);
 			Assert.That(messages.Count - lastBefore, Is.EqualTo(1), "Sustained full speed should be announced exactly once.");
 			Assert.That(messages[^1].M, Is.EqualTo("The game is back to full speed."));
+			var allClear = privateLines.Where(l => l.T > 151000).ToList();
+			Assert.That(allClear, Has.Count.EqualTo(1), "The player told should be given the all-clear once.");
+			Assert.That(allClear[0].Client, Is.EqualTo(1));
+			Assert.That(allClear[0].M, Is.EqualTo(">>> P1: your computer is keeping up again."));
+			Assert.That(allClear[0].T, Is.InRange(messages[^1].T + 1, messages[^1].T + 4000),
+				"The all-clear should follow shortly after full speed is announced.");
 
 			var kick = new GameSpeedAnnouncer(false, null, i => $"P{i}");
 			kick.Tick(0, 80, 1, 0, -1, 10);
+			Assert.That(kick.Tick(3000, 80, 1, 0, -1, 10)?.PrivateClient, Is.EqualTo(1), "Precondition: the private line has gone out.");
 			Assert.That(kick.Tick(5000, 80, 1, 0, -1, 10), Is.Null, "Precondition: within the rate limit nothing is said.");
 			kick.SlowestPlayerGone();
 			var afterKick = kick.Tick(6000, 100, null, 0, -1, 10);
@@ -837,18 +857,36 @@ namespace OpenRA.Test
 			Assert.That(afterKick.Value.Message, Is.EqualTo("The game is back to full speed."));
 			Assert.That(kick.Tick(7000, 100, null, 0, -1, 10), Is.Null, "...and only once.");
 
-			var named = new GameSpeedAnnouncer(true, null, i => $"P{i}");
-			var m1 = named.Tick(0, 80, 1, 0, -1, 10);
+			var named = new GameSpeedAnnouncer(true, null, i => $"P{i}", fastGameSpeed: true);
+			var m1 = named.Tick(0, 80, 1, 0, -1, 10, 82);
 			Assert.That(m1, Is.Not.Null);
 			Assert.That(m1.Value.Message, Does.Contain("P1's computer"));
-			Assert.That(m1.Value.PrivateClient, Is.EqualTo(1));
-			Assert.That(m1.Value.PrivateMessage, Does.Contain("your computer"));
+			Assert.That(m1.Value.PrivateMessage, Is.Null, "The private line should follow on its own.");
+			var pm = named.Tick(3000, 80, 1, 0, -1, 10, 82);
+			Assert.That(pm, Is.Not.Null);
+			Assert.That(pm.Value.Message, Is.Null);
+			Assert.That(pm.Value.PrivateClient, Is.EqualTo(1));
+			Assert.That(pm.Value.PrivateMessage, Does.StartWith(">>> P1, THIS IS ABOUT YOU:")
+				.And.Contain("At this game speed, VSync alone causes this on a 60 Hz monitor."));
+
+			var m3 = named.Tick(40000, 70, 2, 0, -1, 10, 72);
+			Assert.That(m3?.Message, Does.Contain("P2's computer"), "A slowdown for another player should be announced.");
+			var l1 = named.Tick(43000, 70, 2, 0, -1, 10, 72);
+			var l2 = named.Tick(44000, 70, 2, 0, -1, 10, 72);
+			Assert.That(l1?.PrivateClient, Is.EqualTo(1), "The player told before should get the all-clear.");
+			Assert.That(l1.Value.PrivateMessage, Is.EqualTo(">>> P1: your computer is keeping up again."));
+			Assert.That(l2?.PrivateClient, Is.EqualTo(2), "The new slowest player should get the flag.");
+			Assert.That(l2.Value.PrivateMessage, Does.StartWith(">>> P2, THIS IS ABOUT YOU:"));
+			Assert.That(named.Tick(45000, 70, 2, 0, -1, 10, 72), Is.Null);
 
 			var floor = new GameSpeedAnnouncer(false, null, i => $"P{i}");
 			var m2 = floor.Tick(0, 100, null, 1, 2, 75);
 			Assert.That(m2, Is.Not.Null);
 			Assert.That(m2.Value.Message, Does.Contain("75%").And.Not.Contain("P2"));
-			Assert.That(m2.Value.PrivateClient, Is.EqualTo(2));
+			Assert.That(m2.Value.PrivateMessage, Is.Null);
+			var f2 = floor.Tick(3000, 100, null, 1, 2, 75);
+			Assert.That(f2?.PrivateClient, Is.EqualTo(2));
+			Assert.That(f2.Value.PrivateMessage, Does.StartWith(">>> P2, THIS IS ABOUT YOU: your computer can't keep up with the game even at 75%"));
 		}
 
 		[Test]
@@ -857,14 +895,19 @@ namespace OpenRA.Test
 			var a = new GameSpeedAnnouncer(false, null, i => $"P{i}");
 			Assert.That(a.Tick(0, 100, null, 0, -1, 10), Is.Null);
 			Assert.That(a.Tick(1000, 60, 1, 0, -1, 10)?.Message, Does.StartWith("Slowing the game to 60%"));
+			Assert.That(a.Tick(4000, 60, 1, 0, -1, 10)?.PrivateClient, Is.EqualTo(1), "The private line should follow.");
 			Assert.That(a.Tick(40000, 90, 1, 0, -1, 10), Is.Null, "A partial recovery should not be announced.");
 			Assert.That(a.Tick(80000, 78, 1, 0, -1, 10)?.Message, Does.StartWith("Slowing the game to 78%"), "A slowdown from the quiet peak should be announced.");
+			Assert.That(a.Tick(83000, 78, 1, 0, -1, 10)?.PrivateMessage, Does.Contain("slowed to 78%"), "The private line should follow again.");
 			Assert.That(a.Tick(120000, 100, null, 0, -1, 10), Is.Null, "Full speed should wait for the settle time.");
 			Assert.That(a.Tick(131000, 100, null, 0, -1, 10)?.Message, Is.EqualTo("The game is back to full speed."));
 			a.ContinuedWithout(2);
 			Assert.That(a.Tick(132000, 100, null, 0, -1, 10)?.Message, Does.StartWith("P2 has stopped responding; the game continues without them"),
 				"Continuing without a stopped player should be announced at once.");
 			Assert.That(a.Tick(133000, 100, null, 0, -1, 10), Is.Null);
+			Assert.That(a.Tick(134000, 100, null, 0, -1, 10)?.PrivateMessage, Is.EqualTo(">>> P1: your computer is keeping up again."),
+				"The all-clear should follow full speed.");
+			Assert.That(a.Tick(135000, 100, null, 0, -1, 10), Is.Null);
 		}
 
 		[Test]

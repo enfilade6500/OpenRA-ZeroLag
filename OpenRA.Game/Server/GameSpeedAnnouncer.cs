@@ -90,8 +90,8 @@ namespace OpenRA.Server
 		/// <param name="namePlayer">Name the player the game is slowed down for. Otherwise they are only told privately.</param>
 		/// <param name="voteHint">Appended to slowdown messages (e.g. how to vote to kick the slowest player), or null.</param>
 		/// <param name="describeClient">Returns a player's name.</param>
-		/// <param name="fastGameSpeed">The game runs at a speed above normal (a timestep under 40 ms), where VSync alone
-		/// holds a 60 Hz client under 100%; the private advice says so.</param>
+		/// <param name="fastGameSpeed">The game runs at "faster" or "fastest" (a timestep under 34 ms), where two 60 Hz
+		/// refresh periods no longer fit in a tick and VSync alone holds such a client under 100%; the private advice says so.</param>
 		public GameSpeedAnnouncer(bool namePlayer, string voteHint, Func<int, string> describeClient, bool fastGameSpeed = false)
 		{
 			this.namePlayer = namePlayer;

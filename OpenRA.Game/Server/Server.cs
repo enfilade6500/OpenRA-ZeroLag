@@ -1674,7 +1674,7 @@ namespace OpenRA.Server
 					if (Settings.AnnounceGameSpeed)
 						speedAnnouncer = new GameSpeedAnnouncer(Settings.NameSlowestPlayer,
 							voteKickSlowest ? $"Type {SlowestPlayerVote.Command} to vote to kick the slowest player." : null, DescribeClient,
-							gameSpeed.Timestep < 40);
+							gameSpeed.Timestep < 34);
 				}
 			}
 		}

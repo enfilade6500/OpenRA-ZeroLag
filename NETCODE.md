@@ -533,8 +533,9 @@ words and the timing.
    someone else) they get one private all-clear, `>>> ENFILADE: your computer is keeping up
    again.`, so a player who just changed a setting knows it worked.
 4. The advice names the two checkboxes: `Settings > Display: untick "Enable VSync", tick
-   "Limit framerate to game tick rate"; close other programs.` At game speeds above normal
-   it adds `At this game speed, VSync alone causes this on a 60 Hz monitor.`
+   "Limit framerate to game tick rate"; close other programs.` At game speeds *faster* and
+   *fastest* (ticks under 34 ms, where two 60 Hz refresh periods no longer fit in one) it adds
+   `At this game speed, VSync alone causes this on a 60 Hz monitor.`
 
 There is deliberately no repetition while the slowdown lasts: one line when it starts, one
 when it ends. (`GameSpeedAnnouncer.PrivateDelay`; the announcer's public rate limit does not

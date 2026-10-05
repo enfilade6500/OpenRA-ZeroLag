@@ -156,6 +156,11 @@ namespace OpenRA
 			"Sent after the message of the day (motd.txt).")]
 		public bool ZeroLagNotice = false;
 
+		[Desc("Print the map's briefing text (its MissionData Briefing) in the lobby chat when the map is chosen and to " +
+			"each player who joins. Set to False on a server whose maps use it for long change logs that push the chat " +
+			"off the screen.")]
+		public bool ShowMapBriefing = true;
+
 		[Desc("For dedicated servers only, treat maps that fail the lint checks as invalid.")]
 		public bool EnableLintChecks = true;
 

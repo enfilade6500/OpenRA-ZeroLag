@@ -78,6 +78,7 @@ server. See [SERVER-INSTALL.md](SERVER-INSTALL.md) for a step-by-step version wi
 | `Server.NameSlowestPlayer` | `False` | Name the player the game is slowed down for in those messages. |
 | `Server.VoteKickSlowest` | `False` | Enable the `!kickslow` vote. Also requires the stock `Server.EnableVoteKick`. |
 | `Server.ZeroLagNotice` | `False` | One line to each player on joining the lobby: that this is a ZeroLag server and which commands exist. Sent after your `motd.txt`. |
+| `Server.ShowMapBriefing` | `True` | Print the map's briefing text (`MissionData` → `Briefing`) in the lobby chat when the map is chosen and to each player who joins, as stock does. `False` on a server whose maps use it for long change logs that push the chat off the screen. |
 
 **The server log** (`Logs/dedicated-server.log`) records every slowdown with the player's
 name and what their computer managed, every dropout that was turned into buffer, lists

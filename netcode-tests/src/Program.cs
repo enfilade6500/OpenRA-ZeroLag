@@ -398,6 +398,12 @@ namespace NetHarness
 			var result = Summarize(label, scenarioName, description, clients, windowStart, Math.Min(windowEnd, Clock.Now));
 			if (replayFailures > 0)
 				result.LockstepOk = false;
+			// --messages 1: list every system line each client received from the server (lobby and game), for checking
+			// what the server says and does not say
+			if (opts.GetValueOrDefault("messages", "0") == "1")
+				foreach (var c in all)
+					extraChecks.Add($"{c.Metrics.Name} saw: " + string.Join(" | ", c.ServerMessages.Select(m => m.Text.Replace("\n", "\\n"))));
+
 			result.ExtraChecks = extraChecks;
 			if (lurkers.Any(l => !l.Closed || !l.GotServerError))
 				result.LockstepOk = false;

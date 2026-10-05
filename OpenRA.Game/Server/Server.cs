@@ -1021,11 +1021,17 @@ namespace OpenRA.Server
 
 		public void SendOrderTo(Connection conn, string order, string data)
 		{
+			if (order == "Message" && IsHiddenMapBriefing(data))
+				return;
+
 			DispatchOrdersToClient(conn, 0, 0, Order.FromTargetString(order, data, true).Serialize());
 		}
 
 		public void SendMessage(string text)
 		{
+			if (IsHiddenMapBriefing(text))
+				return;
+
 			DispatchServerOrdersToClients(Order.FromTargetString("Message", text, true));
 
 			if (Type == ServerType.Dedicated)
@@ -1045,6 +1051,45 @@ namespace OpenRA.Server
 		{
 			var text = FluentMessage.Serialize(key, args);
 			DispatchOrdersToClient(conn, 0, 0, Order.FromTargetString("FluentMessage", text, true).Serialize());
+		}
+
+		// The current map's briefing as the lobby sends it, looked up once per map, while ShowMapBriefing is off
+		string hiddenBriefing, hiddenBriefingMap;
+
+		/// <summary>
+		/// Whether <paramref name="text"/> is the map briefing the lobby prints when the map is chosen and to each joining
+		/// player, and the server is set not to show it. The briefing itself is sent by the mod's lobby code; it is
+		/// recognised here by its text, so that this stays a change to this assembly alone.
+		/// </summary>
+		bool IsHiddenMapBriefing(string text)
+		{
+			if (Settings.ShowMapBriefing || string.IsNullOrEmpty(text) || Map == null)
+				return false;
+
+			if (hiddenBriefingMap != Map.Uid)
+			{
+				hiddenBriefingMap = Map.Uid;
+				hiddenBriefing = MapBriefing(Map);
+			}
+
+			return hiddenBriefing != null && text == hiddenBriefing;
+		}
+
+		/// <summary>The map's MissionData briefing, formatted as the lobby prints it, or null. MissionData is defined in
+		/// the mod assembly, which this one cannot reference, so the trait is found by name.</summary>
+		static string MapBriefing(MapPreview map)
+		{
+			try
+			{
+				var missionData = map.WorldActorInfo?.TraitInfos<TraitInfo>().FirstOrDefault(t => t.GetType().Name == "MissionDataInfo");
+				var briefing = missionData?.GetType().GetField("Briefing")?.GetValue(missionData) as string;
+				return string.IsNullOrEmpty(briefing) ? null : briefing.Replace("\\n", "\n");
+			}
+			catch (Exception e)
+			{
+				Log.Write("server", $"Could not read the map briefing: {e.Message}");
+				return null;
+			}
 		}
 
 		void WriteLineWithTimeStamp(string line)

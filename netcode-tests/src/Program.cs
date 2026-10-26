@@ -264,6 +264,9 @@ namespace NetHarness
 			FakeClient.SkipReady = opts.GetValueOrDefault("crashtest", "0") == "1";
 			FakeClient.GameSpeed = opts.GetValueOrDefault("speed", null);
 			FakeClient.MapRaceUid = opts.GetValueOrDefault("maprace", null);
+			FakeClient.LobbyHoldMs = long.Parse(opts.GetValueOrDefault("lobbyhold", "0"), CultureInfo.InvariantCulture);
+			FakeClient.NoSync = opts.GetValueOrDefault("nosync", "0") == "1";
+			FakeClient.LobbyOnly = opts.GetValueOrDefault("lobbyonly", "0") == "1";
 			FakeClient.DefeatBit = int.Parse(opts.GetValueOrDefault("defeatbit", "-1"));
 			FakeClient.DefeatAtFrame = int.Parse(opts.GetValueOrDefault("defeatframe", int.MaxValue.ToString()));
 			var (description, build) = Scenarios.All[scenarioName];
@@ -284,6 +287,50 @@ namespace NetHarness
 
 				// Join in order so the first client becomes the lobby admin
 				Thread.Sleep(400);
+			}
+
+			// --command TEXT: the first client (the admin) sends this lobby command ("option bounty False") once everyone
+			// is in; --chat TEXT: it then says this in the lobby, before the game starts (with --messages 1 the server's
+			// answer, if any, is listed under what that client saw)
+			var lobbyCommand = opts.GetValueOrDefault("command", null);
+			var lobbyChat = opts.GetValueOrDefault("chat", null);
+			if (lobbyCommand != null || lobbyChat != null)
+			{
+				var joined = Clock.Now + 15000;
+				while (Clock.Now < joined && !clients.All(c => c.LobbyInfo != null && c.LobbyInfo.Clients.Count(k => !k.IsBot) >= clients.Count))
+					Thread.Sleep(50);
+				Thread.Sleep(500);
+				if (lobbyCommand != null)
+				{
+					clients[0].CommandsToSend.Enqueue(lobbyCommand);
+					Thread.Sleep(1500);
+				}
+
+				if (lobbyChat != null)
+				{
+					clients[0].ChatToSend.Enqueue(lobbyChat);
+					Thread.Sleep(1500);
+				}
+			}
+
+			// --lobbyonly 1: that was the whole run; report what the lobby looked like and leave
+			if (FakeClient.LobbyOnly)
+			{
+				Thread.Sleep(1000);
+				var lobbyChecks = new List<string>();
+				foreach (var c in clients)
+					lobbyChecks.Add($"{c.Metrics.Name} saw: " + string.Join(" | ", c.ServerMessages.Select(m => m.Text.Replace("\n", "\\n"))));
+				var lobbyOptions = clients[0].LobbyInfo?.GlobalSettings?.LobbyOptions;
+				if (lobbyOptions != null)
+					lobbyChecks.Add("lobby options: " + string.Join(", ", lobbyOptions.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key}={kv.Value.Value}")));
+				foreach (var c in clients)
+					c.Stop();
+				foreach (var line in lobbyChecks)
+					Console.WriteLine(line);
+				var lobbyOut = opts.GetValueOrDefault("out", null);
+				if (lobbyOut != null)
+					File.WriteAllText(lobbyOut, JsonSerializer.Serialize(new { Label = label, Scenario = scenarioName, LobbyOnly = true, ExtraChecks = lobbyChecks }));
+				return 0;
 			}
 
 			// Wait for the game to start
@@ -401,8 +448,15 @@ namespace NetHarness
 			// --messages 1: list every system line each client received from the server (lobby and game), for checking
 			// what the server says and does not say
 			if (opts.GetValueOrDefault("messages", "0") == "1")
+			{
 				foreach (var c in all)
 					extraChecks.Add($"{c.Metrics.Name} saw: " + string.Join(" | ", c.ServerMessages.Select(m => m.Text.Replace("\n", "\\n"))));
+
+				// ...and the lobby options as the first client last saw them (what Server.LobbyOptions set)
+				var options = all[0].LobbyInfo?.GlobalSettings?.LobbyOptions;
+				if (options != null)
+					extraChecks.Add("lobby options: " + string.Join(", ", options.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key}={kv.Value.Value}")));
+			}
 
 			result.ExtraChecks = extraChecks;
 			if (lurkers.Any(l => !l.Closed || !l.GotServerError))

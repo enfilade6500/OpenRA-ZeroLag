@@ -22,22 +22,31 @@ advance, so one bad connection produces game-wide freezes. On a ZeroLag server:
 
 - Your input delay follows **your own** connection, not the worst one in the game. A player
   on a bad connection feels their own delay; nobody else does.
-- A player whose **connection drops out** gets a buffer sized to their dropouts (up to
-  1.5 s), so their game keeps running through them instead of freezing and fast-forwarding.
-  Only their own commands take longer; nobody else is affected. They are told, and can turn
-  it off or set it themselves with **`!buffer`**. A dropout never slows the game for anyone.
+- A player whose **connection drops out** freezes only their own game for the length of the
+  dropout, then catches up; nobody else notices. A dropout never slows the game for anyone.
+  A player who would rather have a smooth game than a prompt one can ask the server to buffer
+  the game for them with **`!buffer 1.5`** (their own commands then take that much longer),
+  and a host can have that happen by itself with `Server.MaxPlayerBuffer`.
 - A player whose **computer** can't keep up (long games, many units) slows the game down
   **smoothly** instead of the stock stop-start stutter, to what that computer was measured
   managing, and the game then sits just under that ceiling and edges back up as the load
-  passes, rather than speeding up and slowing down every minute. Never below 30% by
-  default: a computer that needs less is left behind, like a spectator, and catches back up
-  at turbo speed if its load drops. Above that it is the players' call. The chat says so —
-  *"Slowing the game to 78% so that the slowest computer can keep up."* — and says when it
-  is back to full speed. The player concerned is told privately, by name, with the two
-  display settings to change, and given the all-clear when they are keeping up again; the
-  others are not told who it is unless the host enables that.
-- Type **`!speed`** in the chat to ask the current game speed, **`!quiet`** to hide the speed
-  messages for yourself.
+  passes, rather than speeding up and slowing down every minute. Never below the server's
+  **minimum game speed** (by default 85%, 80% from 10 players, 75% from 12 and 72% from
+  14): a computer that needs less is left behind, like a spectator, and catches back up at
+  turbo speed if its load drops. Each player is told the minimum when they join the lobby
+  and everyone when the map changes; the lobby admin can set it for one game with
+  **`!minspeed`**. Above the minimum it is the players' call. The player
+  concerned is told privately, once — *"Name: the game is slowed to 78% because your
+  computer is not keeping up (it is managing about 80%). Close other programs; on a
+  laptop, plug in the charger and pick the performance power mode."* — and given the
+  all-clear when they are keeping up again. The others are not told, unless the host
+  enables the speed messages for everyone or they ask for them (`!speed on`); a player
+  left behind by the floor, and one the game has stopped waiting for, are announced.
+- Type **`!help`** in the chat (lobby or game) for what the server is, its commands and its
+  settings; **`!speed`** to ask the current game speed (`!speed on` to be told of every
+  change); **`!quiet`** to hide the server's messages for yourself; **`!map`** to read the
+  map's description; **`!minspeed`** for the minimum game speed (the admin: `!minspeed 77`
+  sets it for the next game, `!minspeed auto` goes back to the server's table).
 - If the host enables it, type **`!kickslow`** (or just `kickslow`) to vote to kick whichever player the game
   is currently being slowed down for, without needing to know who it is. A majority of the
   players still in the game is needed; votes stand for as long as that player keeps the
@@ -69,21 +78,31 @@ server. See [SERVER-INSTALL.md](SERVER-INSTALL.md) for a step-by-step version wi
 |---|---|---|
 | `Server.Netcode` | `dynamic` | `dynamic` = ZeroLag scheduling; `classic` = the original fixed-latency relay, for A/B testing or rollback without swapping files. |
 | `Server.MaxPlayerLag` | `3000` | Milliseconds a slow-PC player may fall behind (absorbing the lag alone) before the whole game is slowed for them. 3 s means temporary dips such as big battles usually never touch the other players; `0` slows everyone as soon as anyone falls behind. |
-| `Server.MinGameSpeed` | `30` | Never slow the game below this percentage for a slow computer; a computer that needs less is left to fall behind on its own, and catches up at turbo speed if it recovers. Above the floor it is the players' call (`!speed`, `!kickslow`): maps played with huge armies routinely run at 50–70% and their players accept that. Not applied with fewer than three players. `0` = no floor, as stock. |
-| `Server.MaxPlayerBuffer` | `1500` | Largest buffer (ms) built for a player whose connection drops out; costs only that player's own input delay. `0` disables it. |
+| `Server.MinGameSpeed` | `85` | Never slow the game below this percentage for a slow computer; a computer that needs less is left to fall behind on its own, and catches up at turbo speed if it recovers. A computer measured only a little under the floor gets the game at the floor first and is left behind only once it has fallen well behind there (one reading wobbles by ten points). Above the floor it is the players' call (`!speed`, `!kickslow`). Not applied with fewer than three players. `0` = no floor, as stock. |
+| `Server.MinGameSpeedByPlayers` | `10:80,12:75,14:72` | Lower floors for games with more players, as `players:percent` pairs: the floor for a game is the entry with the most players not above the number playing, or `MinGameSpeed` below the smallest. Bigger games mean bigger maps, more computers, and more lost by leaving players behind. The lobby admin can override both for one game with `!minspeed <percent>` (`0`: none; `auto`: back to the table); the override lasts until the game ends or the lobby empties. Empty: `MinGameSpeed` for every game. |
+| `Server.MaxPlayerBuffer` | `0` | Largest buffer (ms) built automatically for a player whose connection drops out repeatedly; costs only that player's own input delay. `0`: none unless the player asks (`!buffer`). Players who had it turned it off: recency beats smoothness. |
 | `Server.MaxCatchUpSpeed` | `400` | Fastest speed (percent) a player far behind is asked to run at to catch up; players slightly behind are asked for much less. |
 | `Server.MaxWaitForStalledPlayer` | `3000` | Longest the game pauses (ms) for a player who stops responding, before continuing without them. `0` never pauses. |
 | `Server.StartDelay` | `2000` | Wait (ms) after the last player has finished loading before the game starts, so that player's graphics warm up like everyone else's did while they waited for them. `0` starts at once. |
-| `Server.AnnounceGameSpeed` | `True` | Chat messages when the game slows down and when it is back to full speed (at most one every 30 s); players can `!quiet` them. |
-| `Server.NameSlowestPlayer` | `False` | Name the player the game is slowed down for in those messages. |
+| `Server.AnnounceGameSpeed` | `True` | ZeroLag's chat lines: the slow player told privately, once; everyone told of a player left behind by the floor or one the game stopped waiting for. Players can `!quiet` them. `False`: none (log only). |
+| `Server.AnnounceSpeedChanges` | `False` | Also tell everyone each time the game slows down and when it is back to full speed (at most one line every 30 s). `False`: only players who type `!speed on`. |
+| `Server.NameSlowestPlayer` | `False` | Name the player the game is slowed down for in the public messages. |
 | `Server.VoteKickSlowest` | `False` | Enable the `!kickslow` vote. Also requires the stock `Server.EnableVoteKick`. |
-| `Server.ZeroLagNotice` | `False` | One line to each player on joining the lobby: that this is a ZeroLag server and which commands exist. Sent after your `motd.txt`. |
-| `Server.ShowMapBriefing` | `True` | Print the map's briefing text (`MissionData` → `Briefing`) in the lobby chat when the map is chosen and to each player who joins, as stock does. `False` on a server whose maps use it for long change logs that push the chat off the screen. |
+| `Server.ZeroLagNotice` | `True` | One line to each player on joining the lobby: "server: type !help for special server info and commands." Sent after your `motd.txt`. |
+| `Server.ShowMapBriefing` | `False` | Print the map's briefing text (`MissionData` → `Briefing`) in the lobby chat when the map is chosen and to each player who joins, as stock does. Off by default because maps use it for long change logs that push the chat off the screen: players get one line saying the map has a description and that `!map` shows it. |
+| `Server.LobbyOptions` | `explored=True,reusable-engineers=True,bounty=True` | Lobby options the server prefers, as `id=value` pairs: applied to every map that offers the option and does not lock it, in place of the map's default, as if the admin had set them; the admin can still change them for their game. `none` leaves the maps' own defaults alone. They are put back (and every other option back to its map default) after every game and whenever the lobby empties, so the next group starts from the host's settings. Players joining are told which options differ from the map's defaults, as stock does for an admin's changes. |
+| `Server.PaceLog` | `True` | Dedicated servers: write `Logs/zerolag-pace.log`, one line per player per second with what the server measures about the player (frames behind, of which in flight and backlog, ms behind, buffer, speed asked of them) next to what the player's own game reports in its ping replies (frames received but not yet run). CSV with a header line; a few MB per hour of a full game. Nothing is decided from it. |
 
 **The server log** (`Logs/dedicated-server.log`) records every slowdown with the player's
 name and what their computer managed, every dropout that was turned into buffer, lists
 players who are behind every 10 s (and why), and writes a one-line summary for each player
 when they leave, including their connection's dropouts. `grep -E "Slowing|full speed|behind|dropped out|Summary for"` is a good start.
+
+**The pace log** (`Logs/zerolag-pace.log`, v1.4) is the same story as numbers, once a second per
+player: the server's estimate of how far behind each player is and how much of that is their own
+computer (`backlog_frames`), beside the player's own report of frames waiting to be run
+(`queue_frames`). When the two agree the server's picture is right; when the queue is empty but the
+server sees lag, the delay is on the network, not in the computer.
 
 ## How it works
 

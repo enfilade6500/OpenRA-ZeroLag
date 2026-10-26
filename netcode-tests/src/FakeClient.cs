@@ -142,6 +142,20 @@ namespace NetHarness
 		/// <summary>Chat lines to send to the server (as the release client does when the player presses Enter).</summary>
 		public readonly ConcurrentQueue<string> ChatToSend = new();
 
+		/// <summary>Lobby server commands to send ("option bounty False", as the lobby UI does when the admin clicks).</summary>
+		public readonly ConcurrentQueue<string> CommandsToSend = new();
+
+		/// <summary>--lobbyonly: nobody readies up or starts the game; the run ends after the lobby chatter.</summary>
+		public static bool LobbyOnly;
+
+		/// <summary>--lobbyhold: the admin waits this long (ms) after everyone is ready before starting, so that lobby chat
+		/// and the server's lobby lines can be exchanged and seen first.</summary>
+		public static long LobbyHoldMs;
+		double allReadyAt = -1;
+
+		/// <summary>--nosync: send no sync packets at all, like a client whose game never reports them.</summary>
+		public static bool NoSync;
+
 		/// <summary>System lines received from the server ("Message" orders), and the keys of localized ones ("FluentMessage").</summary>
 		public readonly ConcurrentQueue<(double T, string Text)> ServerMessages = new();
 		public double ClosedAt = double.NaN;
@@ -309,6 +323,8 @@ namespace NetHarness
 			// OrderManager.TickImmediate
 			while (ChatToSend.TryDequeue(out var chat))
 				localImmediateOrders.Add(Order.Chat(chat));
+			while (CommandsToSend.TryDequeue(out var command))
+				localImmediateOrders.Add(Order.Command(command));
 
 			SendImmediateOrders();
 			Receive();
@@ -453,7 +469,9 @@ namespace NetHarness
 			var hash = (int)orderStreamHash;
 			Metrics.SyncHashes[netFrameNumber] = hash;
 			var defeatState = DefeatBit >= 0 && netFrameNumber >= DefeatAtFrame ? 1UL << DefeatBit : 0UL;
-			queuedSyncPackets.Enqueue(OrderIO.SerializeSync((netFrameNumber, hash, defeatState)));
+			if (!NoSync)
+				queuedSyncPackets.Enqueue(OrderIO.SerializeSync((netFrameNumber, hash, defeatState)));
+
 			ReceiveSync(netFrameNumber, hash);
 			Metrics.Recording.Add((clientId, OrderIO.SerializeSync((netFrameNumber, hash, defeatState))));
 			Metrics.FramesProcessed = netFrameNumber;
@@ -721,6 +739,9 @@ namespace NetHarness
 			}
 
 			// The release client reports "NotReady" once it has the map; the server drops Invalid clients at game start
+			if (LobbyOnly)
+				return;
+
 			if (me.IsInvalid && !stateSent && !NeverReady && !SkipReady)
 			{
 				stateSent = true;
@@ -743,6 +764,12 @@ namespace NetHarness
 
 			// Wait for everyone (including clients that will never ready up) to join, and for the players to be ready
 			if (LobbyInfo.Clients.Count(c => !c.IsBot) < ExpectedTotalClients || (!SkipReady && LobbyInfo.Clients.Count(c => !c.IsBot && !c.IsInvalid) < expectedClients))
+				return;
+
+			if (allReadyAt < 0)
+				allReadyAt = Clock.Now;
+
+			if (Clock.Now < allReadyAt + LobbyHoldMs)
 				return;
 
 			startRequested = true;

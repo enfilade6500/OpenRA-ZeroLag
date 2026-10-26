@@ -541,6 +541,48 @@ There is deliberately no repetition while the slowdown lasts: one line when it s
 when it ends. (`GameSpeedAnnouncer.PrivateDelay`; the announcer's public rate limit does not
 apply to the private lines, which are tied to a public line already sent.)
 
+### Second finding: the floor flapped
+
+Two of the author's servers ran `Server.MinGameSpeed=85` for six days (79 games, 31 h).
+The floor did what it was for: time slowed fell from 13% to 5% and no game went below
+80% with three or more players. But the log held 115 "too slow to keep up" lines in 14
+games, and 90 of the 104 "has caught up" lines that followed came **one second** after
+the "too slow" line, with the next "too slow" a median 7 s later; one player went round
+that loop 22 times in a game. Two things were wrong:
+
+- A player is slowed down for on a forecast (half a second behind and falling fast enough
+  to pass the lag budget within ten seconds), and that same forecast marked them too slow
+  — but the mark was cleared as soon as they were *inside* the budget, which they were
+  from the start. So: marked, cleared a second later, counters reset, marked again three
+  seconds after that. Every mark is a public line (rate-limited to one per 30 s) and a
+  private one.
+- The floor compared one interval's measurement of the computer with the floor, and one
+  three-second reading wobbles by ten points around what the computer manages over a
+  minute (73–91% for a computer at about 80%). Half the marks were for computers read at
+  80–84%; two in three marked players were also slowed down *for* (to 86–88%) in the
+  same game.
+
+### Changes to the floor
+
+5. A player left behind by the floor is paced again only after staying within half a
+   second of their target for five intervals in a row — their computer is keeping up with
+   the game again — not for merely being inside the lag budget.
+6. A computer read a little under the floor (within ten points) gets the game at the floor
+   first, and is left behind only once it is two lag budgets behind there; the game is
+   never taken below the floor while it applies. A computer read well under the floor is
+   left behind at once, as before. Once the player the game was held at the floor for is
+   left behind, the game probes back up briskly, as after a kick.
+7. "X's computer can't keep up even at 85%" is said once per player per game; the log
+   still has every event.
+
+In the simulated scenarios an 80% computer under an 85% floor is slowed to 85% for a
+minute and a half, left behind once, and the game is back at 100% seven seconds later; a
+computer wobbling between 76% and 100% (88% on average) is never left behind; a 60%
+computer is left behind at once and the game never leaves 100%. Hosts running a floor
+near what ordinary laptops manage (the 85 above sits in the thick of it: a laptop on
+battery read 76% on the bench) should expect the players it leaves behind to really be
+left behind now; the flapping had been nursing them along at 85–88% by accident.
+
 ## Testing
 
 `netcode-tests/` contains a harness of headless clients over simulated bad connections,

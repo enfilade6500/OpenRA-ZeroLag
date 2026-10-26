@@ -11,6 +11,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 
@@ -193,7 +194,22 @@ namespace OpenRA.Server
 		// The floor (Server.MinGameSpeed) leaves a player behind to protect the others; with fewer players than this
 		// there is no majority to protect, and leaving one behind ends the game for everyone. A two-player game
 		// follows the slower computer however slow it is.
-		const int MinPlayersForFloor = 3;
+		public const int MinPlayersForFloor = 3;
+
+		// A player is left behind by the floor only when their computer is measured this far (fraction of normal
+		// speed) below it, or once the game has been held at the floor for them and they are still more than
+		// TooSlowBacklogFactor lag budgets behind. A computer measured a few points below the floor may be fine
+		// (one interval's reading wobbles by ten points or so around what the computer manages over a minute), so
+		// it gets the game at the floor first and is only given up on once it has shown that it cannot keep up
+		// even there.
+		const float TooSlowMargin = 0.10f;
+		const int TooSlowBacklogFactor = 2;
+
+		// A player left behind by the floor is paced again once it has stayed within ReportBehindThreshold of its
+		// target for this many intervals in a row: its computer has recovered and is keeping up with the game. Being
+		// merely inside the lag budget says nothing (a player left behind while falling towards the budget is inside
+		// it at once), and clearing on that made the flag come and go every few seconds.
+		const int TooSlowRecoveryIntervals = 5;
 
 		// A client counts as unable to keep up after falling further behind for this many intervals in a
 		// row despite being told to run faster. A one-off hitch makes it fall behind once and then recover.
@@ -253,9 +269,18 @@ namespace OpenRA.Server
 
 			/// <summary>Growth of the frame lag over the whole window of recent samples, in frames.</summary>
 			public int LagGrowthOverWindow => RecentLagFrames.Count < FallingBehindIntervalsBeforePaceChange + 1 ? 0 : LagFrames - RecentLagFrames.Peek();
+
+			// What the client's own game last reported in a ping reply: frames received but not yet run (-1: nothing
+			// yet), when, and the most seen since the last pace log line. For the pace log only.
+			public int ReportedQueue = -1;
+			public long ReportedQueueTime = -1;
+			public int ReportedQueueMax = -1;
 			public bool IsSpectator;
 			public bool IsDefeated;
 			public bool IsTooSlow;
+
+			// Intervals in a row a player left behind by the floor has stayed close to its target (see TooSlowRecoveryIntervals)
+			public int CaughtUpIntervals;
 
 			// Nobody waits for, or is slowed down for, a client that is not (or no longer) playing, or whose
 			// computer is too slow to be kept in the game by slowing everyone else down
@@ -386,6 +411,7 @@ namespace OpenRA.Server
 		int holdFor = -1;
 		float ceilingSpeed = 1f;
 		int freeIntervals;
+		bool traceHeaderWritten;
 
 		/// <summary>The current game speed as a percentage of normal (100 when the game is not slowed down).</summary>
 		public int SpeedPercent => (int)Math.Round(100 / pace);
@@ -406,6 +432,12 @@ namespace OpenRA.Server
 
 		/// <summary>The lowest game speed (percent) the scheduler will slow the game to; 100 / maxPace.</summary>
 		public int MinSpeedPercent => (int)Math.Round(100 / maxPace);
+
+		/// <summary>
+		/// If set, receives one CSV line per client per control interval with what the scheduler measures about it (the
+		/// pace log), after a header line. Nothing is decided from it.
+		/// </summary>
+		public Action<string> Trace { get; set; }
 
 		/// <summary>Creates a scheduler for one game.</summary>
 		/// <param name="timestep">World tick length for the selected game speed (ms).</param>
@@ -634,10 +666,23 @@ namespace OpenRA.Server
 			state.OpenHoleStart = -1;
 		}
 
-		/// <summary>Round-trip times from the connection's ping history (ms), on receiving a ping reply.</summary>
-		public void ReceivePing(int client, int[] pingHistory, long now = 0)
+		/// <summary>
+		/// Round-trip times from the connection's ping history (ms), on receiving a ping reply, and the number of frames
+		/// the client's game reported as received but not yet run (-1 if the reply did not say).
+		/// </summary>
+		public void ReceivePing(int client, int[] pingHistory, long now = 0, int queueLength = -1)
 		{
-			if (!clients.TryGetValue(client, out var state) || pingHistory.Length == 0)
+			if (!clients.TryGetValue(client, out var state))
+				return;
+
+			if (queueLength >= 0)
+			{
+				state.ReportedQueue = queueLength;
+				state.ReportedQueueTime = now;
+				state.ReportedQueueMax = Math.Max(state.ReportedQueueMax, queueLength);
+			}
+
+			if (pingHistory.Length == 0)
 				return;
 
 			var sorted = pingHistory.OrderBy(p => p).ToArray();
@@ -1037,13 +1082,19 @@ namespace OpenRA.Server
 				}
 			}
 
-			// A player whose computer was too slow has caught up again (it may have recovered): pace them normally
+			// A player whose computer was too slow has caught up and stayed caught up (it may have recovered): pace
+			// them normally again. A player whose frames are no longer tracked has no sample and stays left behind.
 			foreach (var (index, b) in behind)
 			{
 				var state = clients[index];
-				if (state.IsTooSlow && b <= lagBudget)
+				if (!state.IsTooSlow)
+					continue;
+
+				state.CaughtUpIntervals = b <= ReportBehindThreshold ? state.CaughtUpIntervals + 1 : 0;
+				if (state.CaughtUpIntervals >= TooSlowRecoveryIntervals)
 				{
 					state.IsTooSlow = false;
+					state.CaughtUpIntervals = 0;
 					state.FallingBehindIntervals = 0;
 					state.BehindIntervals = 0;
 					log($"{describeClient(index)} has caught up; the game will be slowed down for them again if needed.");
@@ -1123,25 +1174,49 @@ namespace OpenRA.Server
 
 				if (framesPerMs > 0)
 				{
+					var managed = framesPerMs * nominalPeriod;
 					var needed = (float)(1 / (nominalPeriod * PaceHeadroom * framesPerMs));
-					if (needed > maxPace && clients.Values.Count(c => !c.ExemptFromPacing) >= MinPlayersForFloor)
+					var atFloor = false;
+					if (needed > maxPace && FloorApplies)
 					{
-						// Slowing everyone down to the floor would not keep this player in the game anyway,
-						// so don't make the others pay for it: this player falls behind on their own instead
-						state.IsTooSlow = true;
-						state.FallingBehindIntervals = 0;
-						state.BehindIntervals = 0;
-						LastTooSlowPlayer = index;
-						log($"{describeClient(index)}'s computer is too slow to keep up (managing {framesPerMs * nominalPeriod * 100:F0}%, " +
-							$"{b / 1000f:F1}s behind); the game will not be slowed down below {100 / maxPace:F0}% for them, so they will fall behind on their own.");
-						continue;
+						// Slowing everyone down below the floor is not allowed. A player measured well below it, or one
+						// who has had the game at the floor and still fallen far behind, would not be kept in the game by
+						// it anyway, so don't make the others pay for it: this player falls behind on their own instead.
+						// A player measured only a little below the floor gets the game at the floor first: the measured
+						// rate wobbles by that much, and they may well keep up there.
+						var heldAtFloor = pace >= maxPace - 0.005f;
+						if (managed < 1 / maxPace - TooSlowMargin || (heldAtFloor && b > TooSlowBacklogFactor * lagBudget))
+						{
+							state.IsTooSlow = true;
+							state.CaughtUpIntervals = 0;
+							state.FallingBehindIntervals = 0;
+							state.BehindIntervals = 0;
+							LastTooSlowPlayer = index;
+							log($"{describeClient(index)}'s computer is too slow to keep up (managing {managed * 100:F0}%, " +
+								$"{b / 1000f:F1}s behind); the game will not be slowed down below {100 / maxPace:F0}% for them, so they will fall behind on their own.");
+
+							// The game was held at the floor for this player: probe back up briskly, as after a kick
+							if (index == holdFor || index == slowestClient)
+							{
+								slowestClient = -1;
+								holdFor = -1;
+								freeIntervals = 0;
+								if (pace > 1f)
+									StartProbe(LeaveProbeRate);
+							}
+
+							continue;
+						}
+
+						needed = maxPace;
+						atFloor = true;
 					}
 
-					var managed = framesPerMs * nominalPeriod;
 					if (needed > pace + 0.005f)
 					{
+						var floorNote = atFloor ? $"; the server does not go below {100 / maxPace:F0}%" : "";
 						log($"Slowing the game to {100 / needed:F0}% of normal speed so that {describeClient(index)} can keep up " +
-							$"(their computer is managing {managed * 100:F0}% and is {b / 1000f:F1}s behind).");
+							$"(their computer is managing {managed * 100:F0}% and is {b / 1000f:F1}s behind){floorNote}.");
 						state.SlowdownsCaused++;
 					}
 
@@ -1201,6 +1276,9 @@ namespace OpenRA.Server
 							- CreepLevelGain * Math.Max(0, backlog - creepPullBacklog);
 						delta = delta.Clamp(-CreepRampLimit, CreepRampLimit);
 						var floor = Math.Min(speed, 100 * ceilingSpeed * (1 - CreepFloor));
+						if (FloorApplies)
+							floor = Math.Max(floor, 100 / maxPace);
+
 						speed = Math.Min(100f, Math.Max(speed + delta, floor));
 						pace = 100 / speed;
 
@@ -1295,7 +1373,45 @@ namespace OpenRA.Server
 				result.Add((index, tickMs == timestep ? 1f : (tickMs + 0.5f) / timestep));
 			}
 
+			if (Trace != null)
+				WriteTrace(now, behind);
+
 			return result;
+		}
+
+		/// <summary>One pace log line per client: the scheduler's measurements next to what the client reported.</summary>
+		void WriteTrace(long now, Dictionary<int, long> behind)
+		{
+			var ic = CultureInfo.InvariantCulture;
+			if (!traceHeaderWritten)
+			{
+				traceHeaderWritten = true;
+				Trace("time_ms,frame,client,role,lag_frames,min_lag_frames,backlog_frames,behind_ms,buffer_ms,queue_frames,queue_max_frames," +
+					"queue_age_ms,rtt_ms,speed_pct,told_pct,peak_speed_pct,slowest_speed_pct,hole,name");
+			}
+
+			foreach (var (index, state) in clients)
+			{
+				var role = state.IsSpectator ? "S" : state.IsDefeated ? "D" : state.IsTooSlow ? "T" : state.GaveUpWaiting ? "G" : "P";
+				var minLag = state.MinLagFrames == int.MaxValue ? "" : state.MinLagFrames.ToString(ic);
+				var behindMs = behind.TryGetValue(index, out var b) ? b.ToString(ic) : "";
+				var queue = state.ReportedQueue < 0 ? "" : state.ReportedQueue.ToString(ic);
+				var queueMax = state.ReportedQueueMax < 0 ? "" : state.ReportedQueueMax.ToString(ic);
+				var queueAge = state.ReportedQueueTime < 0 ? "" : (now - state.ReportedQueueTime).ToString(ic);
+				var rtt = state.HasRtt ? state.Rtt.ToString(ic) : "";
+				var peak = state.PeakSpeed > 0 ? (state.PeakSpeed * 100).ToString("F0", ic) : "";
+				var slowest = state.SlowestSpeed > 0 ? (state.SlowestSpeed * 100).ToString("F0", ic) : "";
+				var hole = state.OpenHoleStart >= 0 ? "1" : "0";
+				var name = describeClient(index).Replace(',', ' ').Replace('\n', ' ');
+				Trace(string.Join(",",
+					now.ToString(ic), (nextFrame - 1).ToString(ic), index.ToString(ic), role,
+					state.LagFrames.ToString(ic), minLag, state.Backlog.ToString(ic), behindMs, state.TargetSlack.ToString(ic),
+					queue, queueMax, queueAge, rtt,
+					(100 / pace).ToString("F0", ic), (state.RequestedSpeed * 100).ToString("F0", ic), peak, slowest, hole, name));
+
+				// The most seen since the last line starts over from the latest reading
+				state.ReportedQueueMax = state.ReportedQueue;
+			}
 		}
 
 		// The rate (frames per ms) a client has managed over its progress window, with the time it spent in holes
@@ -1324,6 +1440,9 @@ namespace OpenRA.Server
 			var slopePerInterval = (double)(b - state.RecentBehind.Peek()) / (state.RecentBehind.Count - 1);
 			return b + slopePerInterval * TriggerHorizon / Interval > lagBudget;
 		}
+
+		// The floor (Server.MinGameSpeed) protects the other players, so it needs enough of them (see MinPlayersForFloor)
+		bool FloorApplies => clients.Values.Count(c => !c.ExemptFromPacing) >= MinPlayersForFloor;
 
 		// Hold the game for this client, whose computer was just measured managing the given fraction of normal speed
 		void HoldFor(int client, float measuredSpeed)

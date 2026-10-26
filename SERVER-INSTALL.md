@@ -59,15 +59,19 @@ environment file):
 ```
 Server.VoteKickSlowest=True         # players can type !kickslow, or just kickslow (recommended)
 Server.NameSlowestPlayer=True       # chat messages name the slow player
-Server.AnnounceGameSpeed=False      # no chat messages about game speed (log only; players can also !quiet)
-Server.MinGameSpeed=0               # no floor: follow the slowest PC however slow (default 30: a PC needing less is left behind)
+Server.AnnounceSpeedChanges=True    # tell everyone of every speed change (default: only the slow player is told, privately; !speed on opts in)
+Server.AnnounceGameSpeed=False      # no chat messages about game speed at all (log only; players can also !quiet)
+Server.MinGameSpeed=0               # no floor: follow the slowest PC however slow (default 85: a PC needing less is left behind)
+Server.MinGameSpeedByPlayers=10:80,12:75,14:72   # lower floors for bigger games (this is the default; empty for MinGameSpeed always)
 Server.MaxPlayerLag=0               # slow everyone as soon as a PC falls behind (default: it may lag alone for 3 s first)
-Server.MaxPlayerBuffer=0            # no adaptive buffering for lossy connections (default 1500 ms)
+Server.MaxPlayerBuffer=1500         # buffer up to 1.5 s automatically for a player whose connection keeps dropping out (default 0: only on request, !buffer)
+Server.LobbyOptions=none            # the maps' own lobby options (default: explored map, reusable engineers and bounties preferred on every map)
+Server.LobbyOptions=explored=True,startingcash=10000   # other preferences, id=value pairs, in place of the default three
 Server.MaxCatchUpSpeed=200          # ask a player far behind for at most 2x (default 400)
 Server.MaxWaitForStalledPlayer=0    # never pause for a player who stops responding (default 3000 ms)
 Server.StartDelay=0                 # start the moment the last player has loaded (default 2000 ms: let their graphics warm up first)
 Server.Netcode=classic              # original behaviour, without swapping the file back
-Server.ZeroLagNotice=True           # add a "this is a ZeroLag server, type !speed" line when players join
+Server.ZeroLagNotice=False          # no "server: type !help for special server info and commands." line when players join
 ```
 
 The README explains each one. Defaults are: announcements on, nobody named, no vote, a 30%

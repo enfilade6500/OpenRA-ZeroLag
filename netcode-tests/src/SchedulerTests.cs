@@ -663,6 +663,53 @@ static class Tests
 		Check(logs.Any(l => l.Contains("P1 has caught up")), "the return is logged");
 	}
 
+	static void FloorDoesNotFlap()
+	{
+		// Seen on a server with an 85% floor: a player measured a little under the floor was declared too slow on a
+		// forecast (falling towards the lag budget), cleared a second later for being inside the budget, and declared
+		// again three seconds after that, round and round for half an hour, a chat line each time.
+
+		// A computer well under the floor is left behind at once, exactly once, and the game stays at full speed
+		var speeds = new List<int>();
+		var (logs, _, clients) = RunWithCapacities(new[] { 2.0, 0.6, 2.0 }, 90000, 85, (t, cs, sched) => speeds.Add(sched.SpeedPercent));
+		Check(logs.Count(l => l.Contains("P1's computer is too slow")) == 1, $"a 60% computer is declared too slow once ({logs.Count(l => l.Contains("P1's computer is too slow"))} times)");
+		Check(!logs.Any(l => l.Contains("P1 has caught up")), "...and not cleared while it is still slow");
+		Check(speeds.All(x => x == 100), $"the game stays at full speed for the others ({string.Join(",", speeds.Distinct())}%)");
+
+		// A computer a little under the floor gets the game at the floor first; it is left behind only once it has
+		// fallen well past the lag budget there, once, and the game then goes back up. Never below the floor.
+		speeds.Clear();
+		var backAt = -1L;
+		(logs, _, clients) = RunWithCapacities(new[] { 2.0, 0.8, 2.0 }, 240000, 85, (t, cs, sched) =>
+		{
+			speeds.Add(sched.SpeedPercent);
+			if (backAt < 0 && sched.TooSlowPlayers.Any() && sched.SpeedPercent == 100)
+				backAt = t;
+		});
+		var tooSlow = logs.Where(l => l.Contains("P1's computer is too slow")).ToList();
+		Check(logs.Any(l => l.StartsWith("Slowing the game to 85%") && l.Contains("does not go below 85%")), "the game is first slowed to the floor for an 80% computer: "
+			+ string.Join(" | ", logs.Where(l => l.StartsWith("Slowing the game"))));
+		Check(speeds.Min() >= 85, $"the game never goes below the floor ({speeds.Min()}%)");
+		Check(tooSlow.Count == 1, $"the 80% computer is declared too slow exactly once ({tooSlow.Count} times): {string.Join(" | ", tooSlow)}");
+		Check(tooSlow.Count == 1 && tooSlow[0].Contains("s behind") && float.Parse(tooSlow[0].Split("%, ")[1].Split("s behind")[0]) >= 6,
+			"...only once it is two lag budgets behind at the floor: " + string.Join(" | ", tooSlow));
+		Check(!logs.Any(l => l.Contains("P1 has caught up")), "...and not cleared while it is still slow");
+		Check(logs.Count(l => l.StartsWith("Slowing the game")) <= 2, $"the slowdown is logged once, not every interval ({logs.Count(l => l.StartsWith("Slowing the game"))} lines)");
+		Check(backAt > 0 && speeds.Skip((int)(backAt / 1000)).All(x => x == 100), $"the game is back at full speed afterwards and stays there (from {backAt / 1000}s)");
+
+		// A computer whose rate wobbles around the floor (three seconds at 76%, three at 100%: 88% on average) is
+		// not left behind on a low reading: it gets the game at the floor and keeps up there
+		speeds.Clear();
+		(logs, _, clients) = RunWithCapacities(new[] { 2.0, 0.76, 2.0 }, 180000, 85, (t, cs, sched) =>
+		{
+			cs[1].Capacity = (t / 3000) % 2 == 0 ? 0.76 : 1.0;
+			speeds.Add(sched.SpeedPercent);
+		});
+		Check(!logs.Any(l => l.Contains("too slow")), "a computer wobbling around the floor is not left behind: " + string.Join(" | ", logs.Where(l => l.Contains("too slow"))));
+		Check(speeds.Min() >= 85, $"the game never goes below the floor ({speeds.Min()}%)");
+		Check(clients[0].NextFrame - clients[1].NextFrame < 50, $"the wobbling player is kept in the game ({clients[0].NextFrame - clients[1].NextFrame} frames behind)");
+	}
+
 	static void TwoPlayersFollowTheSlowerComputer()
 	{
 		// In a two-player game there is nobody to protect by leaving the slower player behind, so the floor does
@@ -679,11 +726,16 @@ static class Tests
 		var a = new GameSpeedAnnouncer(false, "Type !kickslow to vote.", i => $"P{i}");
 		var messages = new List<(long T, string M)>();
 		var privateLines = new List<(long T, int Client, string M)>();
+		var speedChanges = new List<bool>();
 		void Step(long t, int speed, int? slowest = null)
 		{
 			var m = a.Tick(t, speed, slowest, 0, -1, 10, slowest.HasValue ? speed + 2 : 0);
 			if (m?.Message != null)
+			{
 				messages.Add((t, m.Value.Message));
+				speedChanges.Add(m.Value.SpeedChange);
+			}
+
 			if (m?.PrivateMessage != null)
 				privateLines.Add((t, m.Value.PrivateClient, m.Value.PrivateMessage));
 		}
@@ -697,6 +749,7 @@ static class Tests
 		Step(60000, 85, 1);
 		Check(messages.Count == 1 && messages[0].M.StartsWith("Slowing the game to 85%") && !messages[0].M.Contains("P1") && messages[0].M.Contains("!kickslow"),
 			"the first slowdown is announced immediately, without naming the player: " + (messages.Count > 0 ? messages[0].M : ""));
+		Check(speedChanges.Count == 1 && speedChanges[0], "a slowdown is marked as a speed change");
 		Check(privateLines.Count == 0, "the private line does not go out in the same instant as the public one");
 
 		// Drifting 85 -> 80 -> 78 -> 82 over the next 25s: nothing new (small changes, too soon)
@@ -705,17 +758,17 @@ static class Tests
 			Step(61000 + i * 1000, drift[i], 1);
 		Check(messages.Count == 1, $"small drifts are not announced ({messages.Count} messages)");
 		Check(privateLines.Count == 1 && privateLines[0].Client == 1 && privateLines[0].T >= 62000 && privateLines[0].T <= 64000
-			&& privateLines[0].M.StartsWith(">>> P1, THIS IS ABOUT YOU: the game is slowed to 85%") && privateLines[0].M.Contains("managing about 87%")
-			&& privateLines[0].M.Contains("\"Enable VSync\"") && privateLines[0].M.Contains("\"Limit framerate to game tick rate\"") && !privateLines[0].M.Contains("60 Hz"),
-			"the private line follows a couple of seconds later, flagged with the player's name in capitals, their measured speed and the settings to change: "
+			&& privateLines[0].M.StartsWith("P1: the game is slowed to 85%") && privateLines[0].M.Contains("managing about 87%")
+			&& privateLines[0].M.Contains("plug in the charger") && privateLines[0].M.Contains("Close other programs") && !privateLines[0].M.Contains("VSync"),
+			"the private line follows a couple of seconds later, opening with the player's name, with their measured speed and what to try: "
 			+ (privateLines.Count > 0 ? privateLines[0].M : "(none)"));
 
 		// Down to 70% at t=90s (30s after the first message, 15 points lower): announced
 		Step(90000, 70, 1);
 		Check(messages.Count == 2 && messages[1].M.StartsWith("Slowing the game to 70%"), "a large further slowdown is announced once the interval has passed");
 		Step(93000, 70, 1);
-		Check(privateLines.Count == 2 && privateLines[1].M.Contains("slowed to 70%") && !privateLines.Any(l => l.M.Contains("keeping up again")),
-			"a further slowdown for the same player brings a new private line and no all-clear");
+		Step(94000, 70, 1);
+		Check(privateLines.Count == 1, $"a further slowdown for the same player brings no second private line and no all-clear ({privateLines.Count} lines)");
 
 		// Flapping between 100% and 90% every 5s for a minute: at most one message per 30s, never "back to full speed"
 		var before = messages.Count;
@@ -730,7 +783,7 @@ static class Tests
 			Step(t, 100);
 		Check(messages.Count == lastBefore + 1 && messages.Last().M == "The game is back to full speed.", $"sustained full speed is announced exactly once ({messages.Count - lastBefore})");
 		var allClear = privateLines.Where(l => l.T > 151000).ToList();
-		Check(allClear.Count == 1 && allClear[0].Client == 1 && allClear[0].M == ">>> P1: your computer is keeping up again."
+		Check(allClear.Count == 1 && allClear[0].Client == 1 && allClear[0].M == "P1: your computer is keeping up again."
 			&& allClear[0].T > messages.Last().T && allClear[0].T <= messages.Last().T + 4000,
 			"the player told is given the all-clear once, shortly after full speed is announced: " + string.Join(" | ", allClear.Select(l => l.M)));
 
@@ -744,22 +797,21 @@ static class Tests
 		Check(afterKick != null && afterKick.Value.Message == "The game is back to full speed.", "full speed is announced immediately after the slowest player is kicked");
 		Check(kick.Tick(7000, 100, null, 0, -1, 10) == null, "...and only once");
 
-		// With naming on, the message names the player; at a fast game speed the private advice mentions VSync and the monitor
-		var named = new GameSpeedAnnouncer(true, null, i => $"P{i}", fastGameSpeed: true);
+		// With naming on, the message names the player
+		var named = new GameSpeedAnnouncer(true, null, i => $"P{i}");
 		var m1 = named.Tick(0, 80, 1, 0, -1, 10, 82);
 		Check(m1 != null && m1.Value.Message.Contains("P1's computer") && m1.Value.PrivateMessage == null,
 			"naming option names the player publicly; the private line follows on its own");
 		var pm = named.Tick(3000, 80, 1, 0, -1, 10, 82);
-		Check(pm != null && pm.Value.Message == null && pm.Value.PrivateClient == 1 && pm.Value.PrivateMessage.StartsWith(">>> P1, THIS IS ABOUT YOU:")
-			&& pm.Value.PrivateMessage.Contains("At this game speed, VSync alone causes this on a 60 Hz monitor."),
-			"at a fast game speed the private line says that VSync alone does it: " + (pm?.PrivateMessage ?? "(none)"));
+		Check(pm != null && pm.Value.Message == null && pm.Value.PrivateClient == 1 && pm.Value.PrivateMessage.StartsWith("P1: the game is slowed to 80%"),
+			"the private line follows: " + (pm?.PrivateMessage ?? "(none)"));
 
 		// The slowest player changes while the game is slow: the first gets the all-clear, the second the flag
 		var m3 = named.Tick(40000, 70, 2, 0, -1, 10, 72);
 		Check(m3 != null && m3.Value.Message.Contains("P2's computer"), "a slowdown for another player is announced");
 		var l1 = named.Tick(43000, 70, 2, 0, -1, 10, 72);
 		var l2 = named.Tick(44000, 70, 2, 0, -1, 10, 72);
-		Check(l1?.PrivateClient == 1 && l1.Value.PrivateMessage == ">>> P1: your computer is keeping up again." && l2?.PrivateClient == 2 && l2.Value.PrivateMessage.StartsWith(">>> P2, THIS IS ABOUT YOU:"),
+		Check(l1?.PrivateClient == 1 && l1.Value.PrivateMessage == "P1: your computer is keeping up again." && l2?.PrivateClient == 2 && l2.Value.PrivateMessage.StartsWith("P2: the game is slowed to 70%"),
 			"the player told before gets the all-clear and the new one the flag: " + (l1?.PrivateMessage ?? "(none)") + " / " + (l2?.PrivateMessage ?? "(none)"));
 		Check(named.Tick(45000, 70, 2, 0, -1, 10, 72) == null, "...and nothing more");
 
@@ -769,8 +821,25 @@ static class Tests
 		Check(m2 != null && m2.Value.Message.Contains("75%") && !m2.Value.Message.Contains("P2") && m2.Value.PrivateMessage == null,
 			"a player falling behind on their own is announced without a name");
 		var f2 = floor.Tick(3000, 100, null, 1, 2, 75);
-		Check(f2?.PrivateClient == 2 && f2.Value.PrivateMessage.StartsWith(">>> P2, THIS IS ABOUT YOU: your computer can't keep up with the game even at 75%"),
-			"...and told privately, flagged: " + (f2?.PrivateMessage ?? "(none)"));
+		Check(f2?.PrivateClient == 2 && f2.Value.PrivateMessage.StartsWith("P2: your computer can't keep up with the game even at 75%"),
+			"...and told privately: " + (f2?.PrivateMessage ?? "(none)"));
+		Check(m2 != null && !m2.Value.SpeedChange, "a player left behind is news for everyone, not a speed change");
+
+		// A player slowed down for and then left behind gets no all-clear when the game, without them, is back to full speed
+		var left = new GameSpeedAnnouncer(false, null, i => $"P{i}");
+		left.Tick(0, 80, 2, 0, -1, 75, 82);
+		Check(left.Tick(3000, 80, 2, 0, -1, 75, 82)?.PrivateClient == 2, "precondition: P2 was told about the slowdown");
+		left.Tick(40000, 80, null, 1, 2, 75);
+		Check(left.Tick(43000, 80, null, 1, 2, 75)?.PrivateMessage.Contains("can't keep up") == true, "precondition: P2 was told they are left behind");
+		left.Tick(50000, 100, null, 1, 2, 75);
+		var afterFull = left.Tick(75000, 100, null, 1, 2, 75);
+		Check(afterFull?.Message == "The game is back to full speed." && left.Tick(78000, 100, null, 1, 2, 75) == null && left.Tick(79000, 100, null, 1, 2, 75) == null,
+			"full speed without the player left behind brings them no all-clear: " + (afterFull?.Message ?? "(none)"));
+
+		// The same player catching up and being left behind again is not announced again; another player is
+		Check(floor.Tick(40000, 100, null, 0, -1, 75) == null, "catching up is not announced");
+		Check(floor.Tick(80000, 100, null, 1, 2, 75) == null && floor.Tick(81000, 100, null, 1, 2, 75) == null, "the same player left behind again is not announced again");
+		Check(floor.Tick(120000, 100, null, 2, 3, 75)?.Message.Contains("75%") == true, "another player left behind is announced");
 	}
 
 	static void AnnouncerSkipsPartialRecoveries()
@@ -782,14 +851,17 @@ static class Tests
 		Check(a.Tick(40000, 90, 1, 0, -1, 10) == null, "a partial recovery (60% -> 90%) is not announced");
 		var again = a.Tick(80000, 78, 1, 0, -1, 10);
 		Check(again?.Message.StartsWith("Slowing the game to 78%") == true, "a slowdown from the quiet peak (90% -> 78%) is announced: " + (again?.Message ?? "(nothing)"));
-		Check(a.Tick(83000, 78, 1, 0, -1, 10)?.PrivateMessage.Contains("slowed to 78%") == true, "the private line follows again");
+		Check(a.Tick(83000, 78, 1, 0, -1, 10) == null && a.Tick(84000, 78, 1, 0, -1, 10) == null, "the same player is not told privately a second time");
 		Check(a.Tick(120000, 100, null, 0, -1, 10) == null, "full speed waits for the settle time");
 		Check(a.Tick(131000, 100, null, 0, -1, 10)?.Message == "The game is back to full speed.", "full speed is announced once settled");
 		a.ContinuedWithout(2);
 		var cont = a.Tick(132000, 100, null, 0, -1, 10);
 		Check(cont?.Message.StartsWith("P2 has stopped responding; the game continues without them") == true, "continuing without a stopped player is announced at once: " + (cont?.Message ?? "(nothing)"));
 		Check(a.Tick(133000, 100, null, 0, -1, 10) == null, "...and only once");
-		Check(a.Tick(134000, 100, null, 0, -1, 10)?.PrivateMessage == ">>> P1: your computer is keeping up again.", "the all-clear follows full speed");
+		Check(a.Tick(134000, 100, null, 0, -1, 10)?.PrivateMessage == "P1: your computer is keeping up again.", "the all-clear follows full speed");
+		var cont2 = new GameSpeedAnnouncer(false, null, i => $"P{i}");
+		cont2.ContinuedWithout(1);
+		Check(cont2.Tick(0, 100, null, 0, -1, 10)?.SpeedChange == false, "continuing without a stopped player is not a speed change");
 		Check(a.Tick(135000, 100, null, 0, -1, 10) == null, "...and that is all");
 	}
 
@@ -896,6 +968,7 @@ static class Tests
 		SawtoothIsDamped();
 		RecoveryAcceleratesWhenTheLoadPasses();
 		FloorLeavesBehindAndTurboBringsBack();
+		FloorDoesNotFlap();
 		TwoPlayersFollowTheSlowerComputer();
 		AnnouncerIsNotChatty();
 		AnnouncerSkipsPartialRecoveries();

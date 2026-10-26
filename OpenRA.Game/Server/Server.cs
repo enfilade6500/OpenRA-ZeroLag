@@ -147,6 +147,16 @@ namespace OpenRA.Server
 		FrameScheduler frameScheduler;
 		GameSpeedAnnouncer speedAnnouncer;
 		readonly HashSet<int> quietPlayers = new();
+
+		// Players who asked to be told of every speed change (!speed on) or not to be (!speed off), overriding
+		// Server.AnnounceSpeedChanges for themselves
+		readonly HashSet<int> speedChangesOn = new();
+		readonly HashSet<int> speedChangesOff = new();
+
+		// The speed floor by number of players (Server.MinGameSpeedByPlayers), and the lobby admin's override for the
+		// next game (!minspeed), if any
+		readonly (int Players, int Percent)[] floorTable;
+		int? lobbyMinSpeed;
 		SlowestPlayerVote slowestPlayerVote;
 
 		volatile ServerState internalState = ServerState.WaitingPlayers;
@@ -341,6 +351,9 @@ namespace OpenRA.Server
 				}
 			};
 
+			floorTable = ZeroLag.ParseFloorTable(Settings.MinGameSpeedByPlayers);
+			ResetLobbyOptions();
+
 			if (Settings.RecordReplays && Type == ServerType.Dedicated)
 			{
 				recorder = new ReplayRecorder(() => Game.TimestampedFilename(extra: "-Server"));
@@ -359,6 +372,7 @@ namespace OpenRA.Server
 				Log.Write("server", $"Initial mod: {ModData.Manifest.Id}");
 				Log.Write("server", $"Initial map: {LobbyInfo.GlobalSettings.Map}");
 				Log.Write("server", $"ZeroLag {ZeroLag.Version} on {ModData.Manifest.Metadata.Version}: {ZeroLag.DescribeSettings(Settings)}");
+				LogLobbyOptions();
 
 				while (true)
 				{
@@ -624,16 +638,15 @@ namespace OpenRA.Server
 								SendOrderTo(newConn, "Message", motd);
 						}
 
-						// Players should know that the rules of lag have changed on this server, and what they can type
+						// Players should know that the rules of lag have changed on this server: one line, !help has the rest
 						if (Settings.ZeroLagNotice && !string.Equals(Settings.Netcode, "classic", StringComparison.OrdinalIgnoreCase))
 						{
-							var notice = "This is a ZeroLag server: another player's lag can't freeze your game. In game, type !speed to see the game speed, " +
-								"!buffer to see or set how much the server buffers for your connection, !quiet to hide the speed messages";
-							notice += Settings.VoteKickSlowest && Settings.EnableVoteKick
-								? ", or !kickslow to vote to kick the player the game is being slowed down for."
-								: ".";
-							SendOrderTo(newConn, "Message", notice);
+							SendOrderTo(newConn, "Message", "server: type !help for special server info and commands.");
 						}
+
+						// ...and what the speed floor is, before they play
+						if (Settings.AnnounceGameSpeed && IsMultiplayer && UsesDynamicNetcode)
+							SendOrderTo(newConn, "Message", MinSpeedNotice(MapPlayerSlots));
 
 						if ((LobbyInfo.GlobalSettings.MapStatus & Session.MapStatus.UnsafeCustomRules) != 0)
 							SendFluentMessageTo(newConn, CustomRules);
@@ -1022,7 +1035,7 @@ namespace OpenRA.Server
 		public void SendOrderTo(Connection conn, string order, string data)
 		{
 			if (order == "Message" && IsHiddenMapBriefing(data))
-				return;
+				data = MapCommandHint;
 
 			DispatchOrdersToClient(conn, 0, 0, Order.FromTargetString(order, data, true).Serialize());
 		}
@@ -1030,7 +1043,7 @@ namespace OpenRA.Server
 		public void SendMessage(string text)
 		{
 			if (IsHiddenMapBriefing(text))
-				return;
+				text = MapCommandHint;
 
 			DispatchServerOrdersToClients(Order.FromTargetString("Message", text, true));
 
@@ -1045,6 +1058,58 @@ namespace OpenRA.Server
 
 			if (Type == ServerType.Dedicated)
 				WriteLineWithTimeStamp(FluentProvider.GetMessage(key, args));
+
+			// A new map in the lobby: say what the speed floor will be for a game that fills it
+			if (key == "notification-changed-map" && State == ServerState.WaitingPlayers)
+			{
+				LogLobbyOptions();
+				if (IsMultiplayer && UsesDynamicNetcode && Settings.AnnounceGameSpeed)
+					SendMessage(MinSpeedNotice(MapPlayerSlots));
+			}
+		}
+
+		bool UsesDynamicNetcode => !string.Equals(Settings.Netcode, "classic", StringComparison.OrdinalIgnoreCase);
+
+		/// <summary>The playable slots on the current map: the players a full game of it has.</summary>
+		int MapPlayerSlots => Map?.Players?.Players.Values.Count(p => p.Playable) ?? 0;
+
+		/// <summary>The speed floor (percent; 0 = none) for a game of the given number of players: the admin's choice for the next game, or the table's.</summary>
+		int FloorFor(int players) => lobbyMinSpeed ?? ZeroLag.FloorFor(players, Settings.MinGameSpeed, floorTable);
+
+		static string PercentOrNone(int p) => p > 0 ? $"{p}%" : "none";
+
+		/// <summary>The floor as a phrase: the admin's override if there is one, otherwise the server's table.</summary>
+		string FloorDescription() =>
+			lobbyMinSpeed.HasValue ? $"{PercentOrNone(lobbyMinSpeed.Value)} (set by the admin for the next game)" : FloorTableDescription();
+
+		/// <summary>The server's floor table as a phrase: "85% up to 9 players, 80% from 10, 75% from 12, 72% from 14".</summary>
+		string FloorTableDescription()
+		{
+			if (floorTable.Length == 0)
+				return PercentOrNone(Settings.MinGameSpeed);
+
+			var parts = new List<string> { $"{PercentOrNone(Settings.MinGameSpeed)} up to {floorTable[0].Players - 1} players" };
+			foreach (var (players, percent) in floorTable)
+				parts.Add($"{PercentOrNone(percent)} from {players}");
+
+			return string.Join(", ", parts);
+		}
+
+		/// <summary>
+		/// The line that tells the lobby what the speed floor is and what it means for a slow computer: the admin's
+		/// setting for the next game if there is one, otherwise the server's for a game of the given number of players
+		/// (the map's slots; the game itself is held to the floor for the number who actually play).
+		/// </summary>
+		string MinSpeedNotice(int players)
+		{
+			var floor = FloorFor(players);
+			var scope = lobbyMinSpeed.HasValue ? "for the next game" : $"on this server for {players} players";
+			if (floor <= 0)
+				return $"Notice: there is no minimum game speed {scope}: the game follows the slowest computer.";
+
+			var by = lobbyMinSpeed.HasValue ? ", set by the admin" : "";
+			return $"Notice: the minimum game speed {scope} is {floor}%{by}: lag can slow the game down by at most {100 - floor}%. " +
+				"Players will be left behind if their computer runs slower than that!";
 		}
 
 		public void SendFluentMessageTo(Connection conn, string key, object[] args = null)
@@ -1055,6 +1120,7 @@ namespace OpenRA.Server
 
 		// The current map's briefing as the lobby sends it, looked up once per map, while ShowMapBriefing is off
 		string hiddenBriefing, hiddenBriefingMap;
+		const string MapCommandHint = "This map has a description; type !map to read it.";
 
 		/// <summary>
 		/// Whether <paramref name="text"/> is the map briefing the lobby prints when the map is chosen and to each joining
@@ -1075,6 +1141,114 @@ namespace OpenRA.Server
 			return hiddenBriefing != null && text == hiddenBriefing;
 		}
 
+		/// <summary>
+		/// Chat commands that only ask the server something, answered in the lobby as well as in game (the commands about
+		/// the running game are <see cref="InterpretChatCommand"/>). True if <paramref name="text"/> was one.
+		/// </summary>
+		bool InterpretInfoCommand(Connection conn, string text)
+		{
+			var command = text?.Trim().ToLowerInvariant();
+			if (command == "!help")
+			{
+				DispatchOrdersToClient(conn, 0, 0, Order.FromTargetString("Message", HelpText(), true).Serialize());
+				return true;
+			}
+
+			// A player's preferences for this server's messages, kept for as long as they stay connected
+			if (command == "!speed on" || command == "!speed off")
+			{
+				var on = command == "!speed on";
+				(on ? speedChangesOff : speedChangesOn).Remove(conn.PlayerIndex);
+				(on ? speedChangesOn : speedChangesOff).Add(conn.PlayerIndex);
+				SendOrderTo(conn, "Message", on
+					? "You will be told each time the game is slowed down and when it is back to full speed. Type !speed off to stop."
+					: "You will no longer be told of speed changes. !speed still answers.");
+				return true;
+			}
+
+			if (command == "!minspeed" || command.StartsWith("!minspeed ", StringComparison.Ordinal))
+			{
+				SendMinSpeedReply(conn, command.Length > 9 ? command[9..].Trim() : "");
+				return true;
+			}
+
+			if (command == "!quiet")
+			{
+				if (quietPlayers.Add(conn.PlayerIndex))
+					SendOrderTo(conn, "Message",
+						"This server's messages about game speed and lag are now hidden for you. Type !quiet again to show them; !speed always answers.");
+				else
+				{
+					quietPlayers.Remove(conn.PlayerIndex);
+					SendOrderTo(conn, "Message", "This server's messages are shown again.");
+				}
+
+				return true;
+			}
+
+			if (command != "!map")
+				return false;
+
+			var map = Map;
+			if (map == null)
+				return false;
+
+			var briefing = MapBriefing(map);
+			var reply = briefing == null
+				? $"{map.Title}: this map has no description."
+				: $"{map.Title}:{(briefing.StartsWith("\n", StringComparison.Ordinal) ? "" : " ")}{briefing}";
+			DispatchOrdersToClient(conn, 0, 0, Order.FromTargetString("Message", reply, true).Serialize());
+			return true;
+		}
+
+		/// <summary>What this server does about lag, and what can be typed: one chat entry, a bullet per point.</summary>
+		string HelpText()
+		{
+			var s = Settings;
+			var dynamic = !string.Equals(s.Netcode, "classic", StringComparison.OrdinalIgnoreCase);
+			var version = ZeroLag.Version == "unknown" ? "" : $" {ZeroLag.Version}";
+			var voteKick = s.VoteKickSlowest && s.EnableVoteKick;
+			var lines = new List<string>();
+
+			if (!dynamic)
+			{
+				lines.Add($"ZeroLag server{version}, running the original (classic) netcode for this game: every player waits for the slowest connection.");
+				lines.Add("Commands:");
+				lines.Add("- !help: this text");
+				lines.Add("- !map: the map's description");
+				return string.Join("\n", lines);
+			}
+
+			lines.Add($"ZeroLag server{version}");
+			lines.Add("");
+			lines.Add("- A player with a laggy internet connection will not lag the game but may experience their own lag");
+			lines.Add("- Spectators and defeated players never lag the game");
+			lines.Add("- A player with a slow PC can slow the game, but only by a limited percentage; beyond that, they will fall increasingly behind " +
+				"and become mostly unable to interact with the game");
+			lines.Add("- OpenRA is a heavier game than you might think: it is quite demanding for the CPU when many units are in the game." +
+				(s.AnnounceGameSpeed ? " The server will tell you if your PC slows the game down. In that case, consider options to make the game run faster." : ""));
+
+			// The table always, and next to it what applies right now when that differs: the game's own floor, or the admin's choice
+			var current = State == ServerState.GameStarted && frameScheduler != null ? $" (this game: {PercentOrNone(frameScheduler.MinSpeedPercent)})"
+				: lobbyMinSpeed.HasValue ? $" (next game: {PercentOrNone(lobbyMinSpeed.Value)}, set by the admin)" : "";
+			lines.Add($"- Default minimum game speed limits for PC lag are: {FloorTableDescription()}{current}");
+			lines.Add("- The admin can set a custom minimum speed limit with '!minspeed x', where x is the minimum percentage");
+			lines.Add("- See https://github.com/enfilade6500/openra-zerolag for more details");
+			lines.Add("");
+
+			lines.Add("Commands:");
+			lines.Add("- !help: this text");
+			lines.Add("- !map: the map's description");
+			lines.Add("- !minspeed: the minimum game speed for this map (the admin: '!minspeed x' to set it)");
+			lines.Add("- !speed: in game, the game speed and who it is slowed for ('!speed on': be told of every change)");
+			lines.Add("- !quiet: hide or show this server's messages");
+			lines.Add($"- !buffer [off|auto|seconds]: your connection's buffer{(s.MaxPlayerBuffer > 0 ? "" : " (buffer is currently disabled)")}");
+			if (voteKick)
+				lines.Add("- !kickslow: vote to kick the player the game is being slowed down for");
+
+			return string.Join("\n", lines);
+		}
+
 		/// <summary>The map's MissionData briefing, formatted as the lobby prints it, or null. MissionData is defined in
 		/// the mod assembly, which this one cannot reference, so the trait is found by name.</summary>
 		static string MapBriefing(MapPreview map)
@@ -1088,6 +1262,21 @@ namespace OpenRA.Server
 			catch (Exception e)
 			{
 				Log.Write("server", $"Could not read the map briefing: {e.Message}");
+				return null;
+			}
+		}
+
+		/// <summary>The pace log (Logs/zerolag-pace.log) as a line sink, or null if it cannot be opened.</summary>
+		static Action<string> OpenPaceLog()
+		{
+			try
+			{
+				Log.AddChannel("pace", "zerolag-pace.log");
+				return line => Log.Write("pace", line);
+			}
+			catch (Exception e)
+			{
+				Log.Write("server", $"Could not open the pace log: {e.Message}");
 				return null;
 			}
 		}
@@ -1112,17 +1301,135 @@ namespace OpenRA.Server
 
 			if (announcement.Value.Message != null)
 			{
-				// Players who asked for quiet (!quiet) are skipped; everyone else gets it as a normal server message
-				if (quietPlayers.Count == 0)
+				// Players who asked for quiet (!quiet) are skipped. A speed change goes to everyone else only if the
+				// server announces them (Server.AnnounceSpeedChanges); otherwise to the players who asked (!speed on).
+				var speedChange = announcement.Value.SpeedChange;
+				if (quietPlayers.Count == 0 && (!speedChange || (Settings.AnnounceSpeedChanges && speedChangesOff.Count == 0)))
 					SendMessage(announcement.Value.Message);
 				else
 					foreach (var c in Conns.ToList())
-						if (c.Validated && !quietPlayers.Contains(c.PlayerIndex))
+						if (c.Validated && !quietPlayers.Contains(c.PlayerIndex) && (!speedChange || WantsSpeedChanges(c.PlayerIndex)))
 							SendOrderTo(c, "Message", announcement.Value.Message);
 			}
 
-			if (announcement.Value.PrivateMessage != null)
+			if (announcement.Value.PrivateMessage != null && !quietPlayers.Contains(announcement.Value.PrivateClient))
 				SendPrivateMessage(announcement.Value.PrivateClient, announcement.Value.PrivateMessage);
+		}
+
+		bool WantsSpeedChanges(int client) =>
+			Settings.AnnounceSpeedChanges ? !speedChangesOff.Contains(client) : speedChangesOn.Contains(client);
+
+		/// <summary>
+		/// Puts the lobby options back to the host's preferences (Server.LobbyOptions), with every other option at the
+		/// map's default. At startup the map is not loaded yet: the preferences are seeded as the lobby's remembered
+		/// choices, which the map loader (LobbyCommands.LoadMapSettings) carries to every map that offers the option and
+		/// does not lock it, exactly as it carries an admin's choice from one map to the next; a preference for an option
+		/// the map does not have waits for a map that does. Called again whenever the lobby has emptied, so that the next
+		/// group does not inherit the last admin's settings; a game's end starts a new server instance, which seeds afresh.
+		/// </summary>
+		/// <summary>
+		/// One log line per map saying what became of each Server.LobbyOptions entry on it: applied, already the map's
+		/// default, locked by the map, not offered by the map, or not one of the option's values. A preference that
+		/// does nothing is otherwise silent, which is hard to tell from a setting that never reached the server.
+		/// </summary>
+		void LogLobbyOptions()
+		{
+			if (Settings.LobbyOptions.Length == 0 || Map?.PlayerActorInfo == null || Map.WorldActorInfo == null)
+				return;
+
+			var options = Map.PlayerActorInfo.TraitInfos<ILobbyOptions>()
+				.Concat(Map.WorldActorInfo.TraitInfos<ILobbyOptions>())
+				.SelectMany(t => t.LobbyOptions(Map))
+				.ToDictionary(o => o.Id, o => o);
+			var report = new List<string>();
+			foreach (var (id, value) in ZeroLag.ParseLobbyOptions(Settings.LobbyOptions))
+			{
+				if (!options.TryGetValue(id, out var o))
+					report.Add($"{id}: this map has no such option");
+				else if (!o.Values.ContainsKey(value))
+					report.Add($"{id}={value}: not a value of this option ({string.Join(", ", o.Values.Keys)})");
+				else if (o.IsLocked)
+					report.Add($"{id}={value}: locked by the map at {o.DefaultValue}");
+				else if (o.DefaultValue == value)
+					report.Add($"{id}={value}: already the map's default");
+				else
+				{
+					var now = LobbyInfo.GlobalSettings.LobbyOptions.TryGetValue(id, out var state) ? state.Value : "?";
+					report.Add(now == value ? $"{id}={value}: applied (map default {o.DefaultValue})" : $"{id}={value}: NOT applied, lobby has {now}");
+				}
+			}
+
+			if (report.Count > 0)
+				Log.Write("server", $"Server.LobbyOptions on {Map.Title}: {string.Join("; ", report)}.");
+		}
+
+		void ResetLobbyOptions()
+		{
+			var preferred = new Dictionary<string, string>();
+			foreach (var (id, value) in ZeroLag.ParseLobbyOptions(Settings.LobbyOptions))
+				preferred[id] = value;
+
+			var options = LobbyInfo.GlobalSettings.LobbyOptions;
+			options.Clear();
+			foreach (var (id, value) in preferred)
+				options[id] = new Session.LobbyOptionState { Value = value, PreferredValue = value };
+
+			if (Map?.PlayerActorInfo == null || Map.WorldActorInfo == null)
+				return;
+
+			var mapOptions = Map.PlayerActorInfo.TraitInfos<ILobbyOptions>()
+				.Concat(Map.WorldActorInfo.TraitInfos<ILobbyOptions>())
+				.SelectMany(t => t.LobbyOptions(Map));
+			foreach (var o in mapOptions)
+			{
+				var wanted = preferred.TryGetValue(o.Id, out var p) ? p : o.DefaultValue;
+				var value = !o.IsLocked && o.Values.ContainsKey(wanted) ? wanted : o.DefaultValue;
+				options[o.Id] = new Session.LobbyOptionState { IsLocked = o.IsLocked, Value = value, PreferredValue = wanted };
+			}
+		}
+
+		/// <summary>!minspeed: the speed floor; the lobby admin sets the next game's with !minspeed &lt;percent&gt; (0: none; auto: the server's table).</summary>
+		void SendMinSpeedReply(Connection conn, string argument)
+		{
+			if (State == ServerState.GameStarted)
+			{
+				var current = frameScheduler != null && frameScheduler.MinSpeedPercent < 100 ? $"{frameScheduler.MinSpeedPercent}%" : "none";
+				SendOrderTo(conn, "Message", $"The minimum game speed for this game is {current}. The lobby admin can set the next game's with !minspeed <percent>.");
+				return;
+			}
+
+			if (argument.Length == 0)
+			{
+				SendOrderTo(conn, "Message", $"Minimum game speed: {FloorDescription()}. This map has {MapPlayerSlots} player slots: {FloorFor(MapPlayerSlots)}%. " +
+					"The lobby admin can set the next game's with !minspeed <percent> (10-100, or 0 for none); !minspeed auto goes back to the server's table.");
+				return;
+			}
+
+			if (!(LobbyInfo.ClientWithIndex(conn.PlayerIndex)?.IsAdmin ?? false))
+			{
+				SendOrderTo(conn, "Message", "Only the lobby admin can set the minimum game speed.");
+				return;
+			}
+
+			if (argument is "auto" or "default" or "reset")
+			{
+				lobbyMinSpeed = null;
+				SendMessage($"The admin put the minimum game speed back to the server's table ({FloorDescription()}). " + MinSpeedNotice(MapPlayerSlots));
+				return;
+			}
+
+			if (!int.TryParse(argument.TrimEnd('%'), NumberStyles.Integer, CultureInfo.InvariantCulture, out var percent)
+				|| percent < 0 || percent > 100 || (percent > 0 && percent < 10))
+			{
+				SendOrderTo(conn, "Message", "Usage: !minspeed <percent> between 10 and 100, !minspeed 0 for no minimum, or !minspeed auto.");
+				return;
+			}
+
+			lobbyMinSpeed = percent;
+			SendMessage(percent == 0
+				? "The admin removed the minimum game speed for the next game: it will follow the slowest computer."
+				: $"The admin set the minimum game speed for the next game to {percent}%: lag can slow the game down by at most {100 - percent}%. " +
+					"Players will be left behind if their computer runs slower than that!");
 		}
 
 		void SendPrivateMessage(int client, string message)
@@ -1168,6 +1475,9 @@ namespace OpenRA.Server
 						reply += $" Type {SlowestPlayerVote.Command} to vote to kick the slowest player.";
 				}
 
+				if (!WantsSpeedChanges(conn.PlayerIndex))
+					reply += " (!speed on: be told of every change.)";
+
 				SendOrderTo(conn, "Message", reply);
 				return true;
 			}
@@ -1186,19 +1496,6 @@ namespace OpenRA.Server
 			{
 				// "!kick", "!kick name", "!kicksllow": point them at the one command that does something in a running game
 				SendOrderTo(conn, "Message", $"To vote to kick the player the game is being slowed down for, type {SlowestPlayerVote.Command}.");
-				return true;
-			}
-
-			if (command == "!quiet")
-			{
-				if (quietPlayers.Add(conn.PlayerIndex))
-					SendOrderTo(conn, "Message", "Game speed messages are now hidden for you. Type !quiet again to show them; !speed always works.");
-				else
-				{
-					quietPlayers.Remove(conn.PlayerIndex);
-					SendOrderTo(conn, "Message", "Game speed messages are shown again.");
-				}
-
 				return true;
 			}
 
@@ -1281,6 +1578,9 @@ namespace OpenRA.Server
 
 						// Commands for this server start with '!' ('/' commands never leave the client). They are
 						// answered rather than relayed; the sender's own client has already shown them the line.
+						if (InterpretInfoCommand(conn, o.TargetString))
+							break;
+
 						if (frameScheduler != null && State == ServerState.GameStarted && InterpretChatCommand(conn, o.TargetString))
 							break;
 
@@ -1499,8 +1799,17 @@ namespace OpenRA.Server
 
 				// All clients have left: clean up
 				if (!Conns.Any(c => c.Validated))
+				{
 					foreach (var t in serverTraits.WithInterface<INotifyServerEmpty>())
 						t.ServerEmpty(this);
+
+					// The next group starts from the host's settings, not the last admin's
+					if (State == ServerState.WaitingPlayers)
+					{
+						ResetLobbyOptions();
+						lobbyMinSpeed = null;
+					}
+				}
 
 				if (Conns.Any(c => c.Validated) || Type == ServerType.Dedicated)
 					SyncLobbyClients();
@@ -1707,10 +2016,20 @@ namespace OpenRA.Server
 					var spectators = validConns.Select(c => c.PlayerIndex)
 						.Where(i => LobbyInfo.ClientWithIndex(i)?.IsObserver ?? false);
 					string DescribeClient(int index) => LobbyInfo.ClientWithIndex(index)?.Name ?? $"client {index}";
+
+					// The floor depends on how many play (bots run on the players' computers and need none of their own)
+					var players = validConns.Count(c => LobbyInfo.ClientWithIndex(c.PlayerIndex) is { IsObserver: false });
+					var minGameSpeed = FloorFor(players);
+					Log.Write("server", $"Minimum game speed for this game: {(minGameSpeed > 0 ? $"{minGameSpeed}%" : "none")} " +
+						$"({players} players{(lobbyMinSpeed.HasValue ? ", set by the admin" : "")}).");
+
 					frameScheduler = new FrameScheduler(gameSpeed.Timestep, LobbyInfo.GlobalSettings.NetFrameInterval,
 						firstFrame + OrderLatency, validConns.Select(c => c.PlayerIndex), Settings.MaxPlayerLag,
-						DescribeClient, message => Log.Write("server", message), spectators, Settings.MinGameSpeed,
+						DescribeClient, message => Log.Write("server", message), spectators, minGameSpeed,
 						Settings.MaxPlayerBuffer, Settings.MaxCatchUpSpeed, Settings.MaxWaitForStalledPlayer, Settings.StartDelay);
+
+					if (Settings.PaceLog && Type == ServerType.Dedicated)
+						frameScheduler.Trace = OpenPaceLog();
 
 					var voteKickSlowest = Settings.VoteKickSlowest && Settings.EnableVoteKick;
 					if (voteKickSlowest)
@@ -1718,8 +2037,7 @@ namespace OpenRA.Server
 
 					if (Settings.AnnounceGameSpeed)
 						speedAnnouncer = new GameSpeedAnnouncer(Settings.NameSlowestPlayer,
-							voteKickSlowest ? $"Type {SlowestPlayerVote.Command} to vote to kick the slowest player." : null, DescribeClient,
-							gameSpeed.Timestep < 34);
+							voteKickSlowest ? $"Type {SlowestPlayerVote.Command} to vote to kick the slowest player." : null, DescribeClient);
 				}
 			}
 		}
@@ -1837,7 +2155,7 @@ namespace OpenRA.Server
 			{
 				server.ReceivePing(connection, pingHistory);
 				server.orderBuffer?.ReceiveQueueLength(connection.PlayerIndex, queueLength);
-				server.frameScheduler?.ReceivePing(connection.PlayerIndex, pingHistory, Game.RunTime);
+				server.frameScheduler?.ReceivePing(connection.PlayerIndex, pingHistory, Game.RunTime, queueLength);
 			}
 		}
 

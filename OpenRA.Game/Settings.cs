@@ -105,12 +105,19 @@ namespace OpenRA
 
 		[Desc("Multiplayer games: the game is never slowed down below this percentage of normal speed to accommodate a " +
 			"player whose computer can't keep up; a player who would need it slower is left to fall behind on their own " +
-			"instead, and catches back up if their computer recovers. 30 (default) only stops a game from becoming a crawl; " +
-			"above that it is up to the players, who can see the speed with !speed and, if the host enables VoteKickSlowest, " +
-			"vote with !kickslow. Maps played with very large armies routinely run at 50-70% on the slowest computer, and " +
-			"their players accept that. 0 means no floor: as in the original game, the game follows the slowest player's " +
-			"computer however slow it is, smoothly rather than stuttering.")]
-		public int MinGameSpeed = 30;
+			"instead, and catches back up if their computer recovers. The floor for games with more players is set by " +
+			"MinGameSpeedByPlayers; the lobby admin can set it for one game with !minspeed. With fewer than three players " +
+			"there is no floor. 0 means no floor at all: as in the original game, the game follows the slowest player's " +
+			"computer however slow it is, smoothly rather than stuttering. Players see the speed with !speed and, if the " +
+			"host enables VoteKickSlowest, vote with !kickslow.")]
+		public int MinGameSpeed = 85;
+
+		[Desc("Multiplayer games: lower floors for games with more players, as players:percent pairs; the floor for a game " +
+			"is the entry with the most players not above the number of players in the game, or MinGameSpeed below the " +
+			"smallest entry. The default is 85% (MinGameSpeed) up to nine players, 80% from ten, 75% from twelve and 72% " +
+			"from fourteen: bigger games mean bigger maps and more computers, and leaving players behind costs the game " +
+			"more. Empty: MinGameSpeed for every game.")]
+		public string[] MinGameSpeedByPlayers = { "10:80", "12:75", "14:72" };
 
 		[Desc("Multiplayer games: how far behind (in milliseconds) a player whose computer can't keep up may fall " +
 			"before the game is slowed down for everyone. While behind, only that player's orders take longer to take effect, " +
@@ -121,8 +128,11 @@ namespace OpenRA
 		[Desc("Multiplayer games: the largest buffer (in milliseconds) the server builds for a player whose connection drops " +
 			"out, so that their game keeps running through dropouts of up to that length. The cost is that player's own " +
 			"input delay, which grows by the same amount; nobody else is affected. The buffer shrinks again while the " +
-			"connection is quiet, and the player can turn it off or set it by hand with !buffer. 0 disables it.")]
-		public int MaxPlayerBuffer = 1500;
+			"connection is quiet, and the player can turn it off or set it by hand with !buffer. 0 (the default) builds " +
+			"none: players who prefer a smooth game to a prompt one can ask for one with !buffer 1.5. Players who tried " +
+			"the automatic buffer turned it off: a dropout that freezes their own game for a moment bothers them less " +
+			"than every command taking a second longer.")]
+		public int MaxPlayerBuffer = 0;
 
 		[Desc("Multiplayer games: the fastest speed, as a percentage of normal, that a player who has fallen well behind " +
 			"(after a dropout, or after being left behind by MinGameSpeed) is asked to run at to catch up. Players slightly " +
@@ -139,10 +149,16 @@ namespace OpenRA
 			"warmed up; this gives the last one the same chance, instead of their first seconds counting as a slow computer.")]
 		public int StartDelay = 2000;
 
-		[Desc("Multiplayer games: tell the players in the game chat when the game is slowed down for a slow computer " +
-			"and when it is back to full speed (at most one message every 30 seconds). The player concerned is told " +
-			"privately; the others are not told who it is unless NameSlowestPlayer is set. Players can ask with !speed.")]
+		[Desc("Multiplayer games: ZeroLag's lines in the game chat: the player whose computer slows the game down is " +
+			"told so privately, once, with what to try; everyone is told when a player is left behind by the speed " +
+			"floor and when the game stops waiting for a player who stopped responding. Players can hide them with " +
+			"!quiet. False: none of these (the server log still has everything).")]
 		public bool AnnounceGameSpeed = true;
+
+		[Desc("Multiplayer games: also tell everyone each time the game is slowed down and when it is back to full " +
+			"speed (at most one line every 30 seconds). False: only players who type !speed on are told; everyone can " +
+			"ask with !speed.")]
+		public bool AnnounceSpeedChanges = false;
 
 		[Desc("Multiplayer games: name the player whose computer the game is being slowed down for in the game chat.")]
 		public bool NameSlowestPlayer = false;
@@ -152,14 +168,28 @@ namespace OpenRA
 			"cooldown rules as the normal vote kick, and requires EnableVoteKick.")]
 		public bool VoteKickSlowest = false;
 
-		[Desc("Tell each player, when they join the lobby, that this server runs ZeroLag and which chat commands exist. " +
-			"Sent after the message of the day (motd.txt).")]
-		public bool ZeroLagNotice = false;
+		[Desc("Tell each player, when they join the lobby, in one line, that !help lists this server's special commands " +
+			"and settings. Sent after the message of the day (motd.txt).")]
+		public bool ZeroLagNotice = true;
 
 		[Desc("Print the map's briefing text (its MissionData Briefing) in the lobby chat when the map is chosen and to " +
-			"each player who joins. Set to False on a server whose maps use it for long change logs that push the chat " +
-			"off the screen.")]
-		public bool ShowMapBriefing = true;
+			"each player who joins, as the stock server does. Off by default: maps use it for change logs that push the " +
+			"chat off the screen. The lobby says that the map has a description and that !map prints it.")]
+		public bool ShowMapBriefing = false;
+
+		[Desc("Lobby options this server prefers, as id=value pairs: by default explored=True, reusable-engineers=True, " +
+			"bounty=True; others, e.g. startingcash=10000, gamespeed=faster. Each is applied to every map that offers the " +
+			"option and does not lock it, in place of the map's own default, as if the lobby admin had set it; the admin " +
+			"can still change it. 'none' leaves every map's own defaults alone. " +
+			"The ids are the options' own: explored, fog, shortgame, crates, creeps, allybuild, buildradius, startingcash, " +
+			"startingunits, techlevel, gamespeed, timelimit, and in Red Alert bounty, factundeploy, reusable-engineers.")]
+		public string[] LobbyOptions = { "explored=True", "reusable-engineers=True", "bounty=True" };
+
+		[Desc("Dedicated servers, multiplayer games: write Logs/zerolag-pace.log, one line per player per second with " +
+			"what the server measures about the player's progress (frames behind, of which in flight and backlog, " +
+			"milliseconds behind, the speed asked of them) next to what the player's own game reports in its ping " +
+			"replies (frames received but not yet run). A few megabytes per hour of a full game; nothing is decided from it.")]
+		public bool PaceLog = true;
 
 		[Desc("For dedicated servers only, treat maps that fail the lint checks as invalid.")]
 		public bool EnableLintChecks = true;

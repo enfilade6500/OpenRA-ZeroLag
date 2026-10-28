@@ -188,8 +188,9 @@ namespace OpenRA
 		[Desc("Dedicated servers, multiplayer games: write Logs/zerolag-pace.log, one line per player per second with " +
 			"what the server measures about the player's progress (frames behind, of which in flight and backlog, " +
 			"milliseconds behind, the speed asked of them) next to what the player's own game reports in its ping " +
-			"replies (frames received but not yet run). A few megabytes per hour of a full game; nothing is decided from it.")]
-		public bool PaceLog = true;
+			"replies (frames received but not yet run). A few megabytes per hour of a full game; nothing is decided from it. " +
+			"Off by default: it is for studying the netcode, and the server log already has every slowdown and its cause.")]
+		public bool PaceLog = false;
 
 		[Desc("For dedicated servers only, treat maps that fail the lint checks as invalid.")]
 		public bool EnableLintChecks = true;

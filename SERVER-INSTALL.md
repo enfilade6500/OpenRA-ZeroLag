@@ -64,6 +64,7 @@ Server.AnnounceGameSpeed=False      # no chat messages about game speed at all (
 Server.MinGameSpeed=0               # no floor: follow the slowest PC however slow (default 85: a PC needing less is left behind)
 Server.MinGameSpeedByPlayers=10:80,12:75,14:72   # lower floors for bigger games (this is the default; empty for MinGameSpeed always)
 Server.MaxPlayerLag=0               # slow everyone as soon as a PC falls behind (default: it may lag alone for 3 s first)
+Server.PaceLog=True                 # Logs/zerolag-pace.log: one CSV line per player per second of the server's measurements (default off; a few MB an hour)
 Server.MaxPlayerBuffer=1500         # buffer up to 1.5 s automatically for a player whose connection keeps dropping out (default 0: only on request, !buffer)
 Server.LobbyOptions=none            # the maps' own lobby options (default: explored map, reusable engineers and bounties preferred on every map)
 Server.LobbyOptions=explored=True,startingcash=10000   # other preferences, id=value pairs, in place of the default three

@@ -36,9 +36,11 @@ cp "$L/OpenRA.Game.dll" "$L/OpenRA.Game.dll.stock"
 mv OpenRA.Game.dll "$L/OpenRA.Game.dll"
 ```
 
-A running server keeps using the file it already loaded, so do this any time and restart
-the server when nobody is playing. On Windows, stop the server first; the file is locked
-while it runs.
+Use `mv` (or `install`), never `cp` over the existing file: a running server has the file
+mapped into memory, and overwriting it in place can crash the game in progress, while `mv`
+puts a new file in its place and the running server keeps the old one until it restarts.
+So do this any time and restart the server when nobody is playing. On Windows, stop the
+server first; the file is locked while it runs.
 
 ## 4. Restart and check
 
@@ -151,8 +153,11 @@ the server from starting):
 # /etc/systemd/system/openra-ra@.service.d/override.conf
 [Service]
 ExecStartPre=
-ExecStartPre=/bin/sh -c 'L=/var/lib/openra/%i/Logs; A=$L/archive/$(date +%%F-%%H%%M%%S); ls $L/dedicated-*.log >/dev/null 2>&1 && mkdir -p "$A" && mv $L/dedicated-*.log "$A"/ || true'
+ExecStartPre=/bin/sh -c 'L=/var/lib/openra/%i/Logs; A=$L/archive/$(date +%%F-%%H%%M%%S); ls $L/dedicated-*.log >/dev/null 2>&1 && mkdir -p "$A" && mv $L/dedicated-*.log $L/zerolag-pace.log "$A"/ 2>/dev/null || true'
 ```
+
+(`zerolag-pace.log` is only there with `Server.PaceLog=True`; listing it keeps it with the
+rest instead of losing it.)
 
 Installing or updating ZeroLag on this layout:
 
@@ -164,7 +169,9 @@ sha256sum -c OpenRA.Game.dll.sha256
 
 L=/opt/openra/current/usr/lib/openra
 sudo cp "$L/OpenRA.Game.dll" "$L/OpenRA.Game.dll.stock"     # first time only
-sudo cp OpenRA.Game.dll "$L/OpenRA.Game.dll"
+sudo cp "$L/OpenRA.Game.dll" "$L/OpenRA.Game.dll.previous"  # to roll back to
+sudo install -m 644 OpenRA.Game.dll "$L/OpenRA.Game.dll.new" && sudo mv -f "$L/OpenRA.Game.dll.new" "$L/OpenRA.Game.dll"
+# mv, not cp over the file: a running instance has the file mapped and can crash mid-game if it is overwritten in place
 
 # when nobody is playing; each instance picks the file up as it restarts
 sudo systemctl restart openra-ra@1234 openra-ra@1235 openra-ra@1236

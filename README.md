@@ -32,8 +32,8 @@ advance, so one bad connection produces game-wide freezes. On a ZeroLag server:
   managing, and the game then sits just under that ceiling and edges back up as the load
   passes, rather than speeding up and slowing down every minute. Never below the server's
   **minimum game speed** (by default 85%, 80% from 10 players, 75% from 12 and 72% from
-  14): a computer that needs less is left behind, like a spectator, and catches back up at
-  turbo speed if its load drops. Each player is told the minimum when they join the lobby
+  14; none in a game of two, where there is nobody to protect): a computer that needs less
+  is left behind, like a spectator, and catches back up at turbo speed if its load drops. Each player is told the minimum when they join the lobby
   and everyone when the map changes; the lobby admin can set it for one game with
   **`!minspeed`**. Above the minimum it is the players' call. The player
   concerned is told privately, once — *"Name: the game is slowed to 78% because your

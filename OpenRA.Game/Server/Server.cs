@@ -1092,7 +1092,7 @@ namespace OpenRA.Server
 			foreach (var (players, percent) in floorTable)
 				parts.Add($"{PercentOrNone(percent)} from {players}");
 
-			return string.Join(", ", parts);
+			return string.Join(", ", parts) + $" (none with fewer than {FrameScheduler.MinPlayersForFloor})";
 		}
 
 		/// <summary>
@@ -1104,6 +1104,9 @@ namespace OpenRA.Server
 		{
 			var floor = FloorFor(players);
 			var scope = lobbyMinSpeed.HasValue ? "for the next game" : $"on this server for {players} players";
+			if (players < FrameScheduler.MinPlayersForFloor)
+				return $"Notice: there is no minimum game speed with fewer than {FrameScheduler.MinPlayersForFloor} players: the game follows the slowest computer.";
+
 			if (floor <= 0)
 				return $"Notice: there is no minimum game speed {scope}: the game follows the slowest computer.";
 
@@ -2020,8 +2023,10 @@ namespace OpenRA.Server
 					// The floor depends on how many play (bots run on the players' computers and need none of their own)
 					var players = validConns.Count(c => LobbyInfo.ClientWithIndex(c.PlayerIndex) is { IsObserver: false });
 					var minGameSpeed = FloorFor(players);
-					Log.Write("server", $"Minimum game speed for this game: {(minGameSpeed > 0 ? $"{minGameSpeed}%" : "none")} " +
-						$"({players} players{(lobbyMinSpeed.HasValue ? ", set by the admin" : "")}).");
+					var floorNote = players < FrameScheduler.MinPlayersForFloor
+						? $"none ({players} players: the floor needs {FrameScheduler.MinPlayersForFloor})"
+						: $"{(minGameSpeed > 0 ? $"{minGameSpeed}%" : "none")} ({players} players{(lobbyMinSpeed.HasValue ? ", set by the admin" : "")})";
+					Log.Write("server", $"Minimum game speed for this game: {floorNote}.");
 
 					frameScheduler = new FrameScheduler(gameSpeed.Timestep, LobbyInfo.GlobalSettings.NetFrameInterval,
 						firstFrame + OrderLatency, validConns.Select(c => c.PlayerIndex), Settings.MaxPlayerLag,

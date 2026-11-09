@@ -96,6 +96,28 @@ slowdown, p1 sends `!speed`, then p1, p2 and p3 send `!kickslow`. The run passes
 the slow player receives the kick message and is disconnected while the others keep
 playing in lockstep; the chat every client saw is printed in the checks.
 
+## Against a real server
+
+`--host NAME-OR-IP` points the clients at a server across the network instead of one on
+this machine; `--port` is its port, `--password` its password if it has one. With the
+`crew` scenario nothing is simulated in the clients' paths (the real network supplies the
+delay) and the PCs are fast, so what the metrics show is the server and the path to it,
+as its players would experience them:
+
+```sh
+dotnet out/NetHarness.dll --host example.org --port 1234 --scenario crew --players 8 \
+  --speed default --duration 300 --warmup 2 --label theirs --out theirs-1.json
+```
+
+The clients join an empty lobby (the first becomes admin and starts the game, so the
+server must have no one in it and a map with enough slots), play `--duration` seconds at
+`--apm` orders a minute, and report per client: speed%, freezes/min, frozen-ms/min, the
+longest gap, the TickScale range the server sent, and the buffered frames it saw. A server
+that stutters for its players shows it as freezes and a wide scale range at full speed.
+Run the same command against a server you know to be good for the control, and with
+`Server.Netcode=classic` on the suspect server if its owner will set it. Other scenarios
+work too, and add their simulated faults on top of the real path.
+
 ## Also in this directory
 
 - `src/SchedulerTests.cs` + `tools/run-tests.sh` — the FrameScheduler / announcer unit

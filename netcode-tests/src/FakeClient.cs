@@ -156,6 +156,9 @@ namespace NetHarness
 		/// <summary>--nosync: send no sync packets at all, like a client whose game never reports them.</summary>
 		public static bool NoSync;
 
+		/// <summary>--password: the server's password, for a real server that has one.</summary>
+		public static string Password = "";
+
 		/// <summary>System lines received from the server ("Message" orders), and the keys of localized ones ("FluentMessage").</summary>
 		public readonly ConcurrentQueue<(double T, string Text)> ServerMessages = new();
 		public double ClosedAt = double.NaN;
@@ -173,6 +176,9 @@ namespace NetHarness
 		volatile int clientId = -1;
 		volatile bool stop;
 		volatile bool connectionLost;
+		volatile bool receivedHandshake;
+		volatile string lostReason;
+		volatile string lastServerError;
 		Thread mainThread;
 
 		// OrderManager state
@@ -239,6 +245,7 @@ namespace NetHarness
 			{
 				var r = new BinaryReader(stream);
 				var handshakeProtocol = r.ReadInt32();
+				receivedHandshake = true;
 				if (handshakeProtocol != ProtocolVersion.Handshake)
 					throw new InvalidOperationException($"Handshake protocol mismatch {handshakeProtocol}");
 
@@ -260,12 +267,11 @@ namespace NetHarness
 				ClosedAt = Clock.Now;
 				if (NeverReady)
 					Console.WriteLine($"[debug] {name} connection closed at {Clock.Now:F0}: {e.GetType().Name} {e.Message}");
-				// A kicked client still has the server's last packets (including the kick message) queued for the
-				// main thread, exactly as the release client does; it judges the disconnect once it has read them
-				if (ExpectKick)
-					connectionLost = true;
-				else if (!stop && !NeverReady)
-					Fail("connection lost: " + e.Message);
+				// The server's last packets (a ServerError with the reason, when it rejected or kicked us) are still
+				// queued for the main thread, exactly as in the release client; it judges the disconnect once it
+				// has read them, so the failure can carry the server's reason
+				lostReason = e.Message;
+				connectionLost = true;
 			}
 		}
 
@@ -624,8 +630,20 @@ namespace NetHarness
 			// Everything the server sent before closing the connection has now been read
 			if (lost && !stop)
 			{
-				if (!GotServerError)
-					Fail("connection lost without a kick message");
+				if (ExpectKick)
+				{
+					if (!GotServerError)
+						Fail("connection lost without a kick message");
+				}
+				else if (!NeverReady)
+				{
+					// A server that accepts the connection and closes it without even the handshake is not in its
+					// lobby: a game is in progress (the release server drops newcomers silently then) or it is shutting down
+					var why = lastServerError != null ? $"server said \"{lastServerError}\""
+						: !receivedHandshake ? "the server closed the connection without a handshake, which it does while a game is in progress"
+						: lostReason;
+					Fail("connection lost: " + why);
+				}
 
 				stop = true;
 			}
@@ -666,7 +684,7 @@ namespace NetHarness
 							},
 							Mod = request.Mod,
 							Version = request.Version,
-							Password = "",
+							Password = Password,
 							OrdersProtocol = ProtocolVersion.Orders
 						};
 
@@ -707,8 +725,13 @@ namespace NetHarness
 							StartGame();
 						break;
 
+					case "AuthenticationError":
+						lastServerError = order.TargetString;
+						break;
+
 					case "ServerError":
 						GotServerError = true;
+						lastServerError = order.TargetString;
 						ServerMessages.Enqueue((Clock.Now, "error:" + order.TargetString));
 						break;
 

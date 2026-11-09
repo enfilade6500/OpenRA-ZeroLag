@@ -54,3 +54,6 @@ update.log
 
 # IntelliJ files
 .idea
+
+# netcode-tests build output (build.sh writes out/; other local builds use out*/)
+netcode-tests/out*/

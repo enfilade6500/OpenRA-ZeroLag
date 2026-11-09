@@ -82,8 +82,19 @@ namespace NetHarness
 			{
 				clientSide = listener.AcceptSocket();
 				clientSide.NoDelay = true;
-				serverSide = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
-				serverSide.Connect(server);
+				serverSide = new Socket(server.AddressFamily, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+				try
+				{
+					serverSide.Connect(server);
+				}
+				catch (SocketException e) when (!disposed)
+				{
+					// Nothing listening, or no route: say so, and close the client's side so it reports the loss
+					Console.Error.WriteLine($"cannot connect to the server at {server}: {e.Message}");
+					try { clientSide.Dispose(); } catch { }
+					return;
+				}
+
 				upPipe = new Pipe(clientSide, serverSide, up, seed * 2 + 1, this);
 				downPipe = new Pipe(serverSide, clientSide, down, seed * 2 + 2, this);
 				upPipe.Start("up");

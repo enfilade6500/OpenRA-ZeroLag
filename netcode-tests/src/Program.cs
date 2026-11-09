@@ -38,9 +38,23 @@ namespace NetHarness
 			Down = new LinkSpec { BaseMs = 15, JitterMs = 5 },
 		};
 
+		/// <summary>A client with nothing simulated in its path: for a server across a real network (--host), which supplies the delay itself.</summary>
+		static PlayerSpec Direct(string name) => new()
+		{
+			Name = name,
+			Up = new LinkSpec { BaseMs = 0, JitterMs = 0 },
+			Down = new LinkSpec { BaseMs = 0, JitterMs = 0 },
+		};
+
+		/// <summary>Number of clients in the "crew" scenario (--players).</summary>
+		public static int Players = 8;
+
 		public static readonly Dictionary<string, (string Description, Func<List<PlayerSpec>> Build)> All = new()
 		{
 			["clean"] = ("4 players, all ~30ms round trip", () => new() { Good("p1"), Good("p2"), Good("p3"), Good("p4") }),
+
+			["crew"] = ("--players N (default 8) clients with fast PCs and nothing simulated in their paths: a real server across a real network (--host), measured as its players would experience it", () =>
+				Enumerable.Range(1, Players).Select(i => Direct($"p{i}")).ToList()),
 
 			["slowlink"] = ("p4 has a long but steady path: ~300ms round trip, +/-30ms jitter", () =>
 			{
@@ -269,9 +283,28 @@ namespace NetHarness
 			FakeClient.LobbyOnly = opts.GetValueOrDefault("lobbyonly", "0") == "1";
 			FakeClient.DefeatBit = int.Parse(opts.GetValueOrDefault("defeatbit", "-1"));
 			FakeClient.DefeatAtFrame = int.Parse(opts.GetValueOrDefault("defeatframe", int.MaxValue.ToString()));
+			FakeClient.Password = opts.GetValueOrDefault("password", "");
+			Scenarios.Players = int.Parse(opts.GetValueOrDefault("players", "8"));
 			var (description, build) = Scenarios.All[scenarioName];
 			var specs = build();
-			var server = new IPEndPoint(IPAddress.Loopback, port);
+
+			// --host NAME-OR-IP: a server across a real network instead of one on this machine. The clients still go
+			// through the local proxies, so a scenario's simulated path is added on top of the real one; the "crew"
+			// scenario adds nothing.
+			var host = opts.GetValueOrDefault("host", null);
+			IPEndPoint server;
+			try
+			{
+				server = new IPEndPoint(host == null ? IPAddress.Loopback : ResolveHost(host), port);
+			}
+			catch (Exception e) when (e is System.Net.Sockets.SocketException || e is ArgumentException)
+			{
+				Console.Error.WriteLine($"--host {host}: {e.Message}");
+				return 2;
+			}
+
+			if (host != null)
+				Console.WriteLine($"server: {host} -> {server}");
 
 			var proxies = new List<DelayProxy>();
 			var clients = new List<FakeClient>();
@@ -463,7 +496,8 @@ namespace NetHarness
 				result.LockstepOk = false;
 			if (extraChecks.Any(x => x.StartsWith("VOTE KICK FAIL", StringComparison.Ordinal)))
 				result.LockstepOk = false;
-			var json = JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true });
+			// A client that never ticked has NaN gaps; the JSON must still be written (and the table printed) so the failure is reported
+			var json = JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true, NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals });
 			if (outPath != null)
 				File.WriteAllText(outPath, json);
 
@@ -624,6 +658,19 @@ namespace NetHarness
 					"   {0,-6} {1,6:F1} {2,11:F1} {3,14:F0} {4,8:F0} {5,8:F0}/{6,-6:F0} {7,10:F0}/{8,-6:F0} [{9:F2},{10:F2}] {11,6:F0} {12,6:F1}",
 					c.Name, c.SpeedPct, c.FreezesPerMin, c.FrozenMsPerMin, c.MaxGapMs, c.OwnLatencyP50, c.OwnLatencyP95,
 					c.RemoteLatencyP50, c.RemoteLatencyP95, c.MinTickScale, c.MaxTickScale, c.PctTimeScaled, c.AvgQueue));
+		}
+
+		/// <summary>An IP address as given, or the first IPv4 address of a host name (IPv6 if it has no other).</summary>
+		static IPAddress ResolveHost(string host)
+		{
+			if (IPAddress.TryParse(host, out var literal))
+				return literal;
+
+			var addresses = Dns.GetHostAddresses(host);
+			if (addresses.Length == 0)
+				throw new ArgumentException($"{host} does not resolve to an address");
+
+			return addresses.FirstOrDefault(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork) ?? addresses[0];
 		}
 
 		static Dictionary<string, string> ParseArgs(string[] args)

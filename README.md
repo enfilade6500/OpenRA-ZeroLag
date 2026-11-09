@@ -65,6 +65,15 @@ up if they come back.
 **Requirements:** an OpenRA `release-20250330` dedicated server (any OS). Nothing changes
 for your players.
 
+**The machine matters more than it does for stock.** The server does not simulate the game,
+so its load depends on the player count and little else; since v1.5 it costs about what the
+stock server costs (roughly 7% of one core for 8 players, 11% for 12, 26% for 30). But
+ZeroLag keeps every client only 150 ms behind the server where stock keeps them 400 ms
+behind, so a server process that is not scheduled on time stalls everyone, where stock would
+hide the same lateness. A burstable or shared-core cloud VM that has run out of CPU credit
+is exactly such a process: games are smooth at first and then stutter for everyone at
+"full speed". Give ZeroLag a machine with a real core.
+
 **Install:** download `OpenRA.Game.dll` from the [Releases](../../releases) page, check its
 SHA-256 against the one on the release, and replace the file of the same name in your
 server's `lib/openra` directory (on the Linux AppImage layout that is

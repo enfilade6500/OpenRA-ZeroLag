@@ -583,6 +583,44 @@ near what ordinary laptops manage (the 85 above sits in the thick of it: a lapto
 battery read 76% on the bench) should expect the players it leaves behind to really be
 left behind now; the flapping had been nursing them along at 85–88% by accident.
 
+## v1.5 (in progress): what the server costs
+
+The first server outside the author's ran ZeroLag on a shared-core cloud VM, and its
+12-player games ran at 61% speed in clumps while `!speed` reported full speed. The
+harness, pointed at that server from a player's PC (`--host`, see `netcode-tests/README.md`),
+found a hard ceiling: 5 and 8 clients clean, 10 at 81%, 12 at 61%, 30 at 27%, the shape of
+a machine that can do about 8 clients' worth of ZeroLag server work per second.
+
+Measured here with the same harness (server CPU, share of one core; the dedicated server
+does not simulate anything, so this depends on the player count and almost nothing else):
+
+| Clients | Stock | v1.4 | v1.5 |
+| --- | --- | --- | --- |
+| 8 | 7% | 13% | 7% |
+| 12 | 10% | 23% | 11% |
+| 30 | 26% | 63% | 26% |
+
+v1.4 cost twice stock, and the excess was almost all in the per-connection send threads:
+a frame close hands every client one packet per other client plus an ack, and every
+client's sync report was relayed to every other client the moment it arrived, so the
+server made N² socket writes per frame, each waking a thread. v1.5 holds each connection's
+sends for the duration of a frame close and writes them as one buffer (`Connection.HoldSends`),
+and relays sync reports with the next frame close instead of on arrival (they are only
+compared once a client holds all of them; a report waits at most 100 ms if frames have
+stopped closing). Nothing on the wire changes except the segmentation; the harness's
+lockstep and replay checks, and the fault scenarios (leave, dead link, outage, dropout,
+vote-kick, the 14-player melo case), behave as in v1.4.
+
+Stock's own logging thread polls every millisecond and costs a dedicated server 2-3% of a
+core doing nothing (`OpenRA.Game/Support/Log.cs`); making it block brings v1.5 under stock
+(5% at 8 clients, 9% at 12). That change is outside `OpenRA.Game/Server/` and is kept as a
+separate patch.
+
+The quarter-core box above would go from about 8 ZeroLag players to about 20. It would
+still be the wrong machine: ZeroLag keeps clients 150 ms behind the server, so a process
+that is not scheduled on time stalls them where stock's 400 ms lead would hide it, and a
+burstable VM that has spent its credit is exactly such a process.
+
 ## Testing
 
 `netcode-tests/` contains a harness of headless clients over simulated bad connections,

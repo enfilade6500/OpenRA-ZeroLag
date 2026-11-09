@@ -145,6 +145,14 @@ namespace OpenRA.Server
 
 		// Multiplayer games: the server decides which frame each client's orders are applied on (see FrameScheduler)
 		FrameScheduler frameScheduler;
+
+		// Sync reports waiting to be relayed with the next frame close (see ReceiveOrders), and when the first arrived
+		readonly List<(int From, byte[] FrameData)> pendingRelays = new();
+		long oldestPendingRelay;
+
+		// Relays waiting for a frame close go out at the latest this long (ms) after the first of them arrived, in
+		// case frames have stopped closing (the game has ended, or is paused)
+		const int MaxRelayHoldMs = 100;
 		GameSpeedAnnouncer speedAnnouncer;
 		readonly HashSet<int> quietPlayers = new();
 
@@ -380,6 +388,10 @@ namespace OpenRA.Server
 					{
 						var timeout = frameScheduler != null && State == ServerState.GameStarted
 							? frameScheduler.MillisecondsUntilNextAction(Game.RunTime).Clamp(0, 1000) : 1000;
+
+						// Sync reports waiting for a frame close must not wait longer than their hold (see CloseDueFrames)
+						if (pendingRelays.Count > 0)
+							timeout = Math.Min(timeout, (int)Math.Max(0, MaxRelayHoldMs - (Game.RunTime - oldestPendingRelay)));
 
 						if (events.TryTake(out var e, timeout))
 							e.Invoke(this);
@@ -963,10 +975,24 @@ namespace OpenRA.Server
 				// sent it just to update the frame number would be wasteful. We instead send them
 				// a separate Ack packet that tells them to apply the order from a locally stored queue.
 				// TODO: Replace static latency with a dynamic order buffering system
-				if (frameScheduler != null && (data.Length == 0 || data[0] != (byte)OrderType.SyncHash))
+				if (frameScheduler != null)
 				{
-					// The orders are forwarded when the frame they are assigned to is closed
-					frameScheduler.ReceivePacket(conn.PlayerIndex, frame, data, Game.RunTime);
+					if (data.Length == 0 || data[0] != (byte)OrderType.SyncHash)
+					{
+						// The orders are forwarded when the frame they are assigned to is closed
+						frameScheduler.ReceivePacket(conn.PlayerIndex, frame, data, Game.RunTime);
+						return;
+					}
+
+					// Every client sends a sync report every net frame, and relaying each one to every other client
+					// the moment it arrives costs N*N writes per frame. They are only compared once a client holds all
+					// of them, so they go out with the next frame close instead, in the same write as the frame.
+					// The replay still records the arrival now.
+					RecordOrder(frame, data, conn.PlayerIndex);
+					if (pendingRelays.Count == 0)
+						oldestPendingRelay = Game.RunTime;
+					pendingRelays.Add((conn.PlayerIndex, CreateFrame(conn.PlayerIndex, frame, data)));
+					GameSave?.DispatchOrders(conn, frame, data);
 					return;
 				}
 
@@ -989,27 +1015,76 @@ namespace OpenRA.Server
 			GameSave?.DispatchOrders(conn, frame, data);
 		}
 
+		void FlushPendingRelays()
+		{
+			if (pendingRelays.Count == 0)
+				return;
+
+			var conns = Conns.ToList();
+			foreach (var (from, frameData) in pendingRelays)
+				foreach (var c in conns)
+					if (c.PlayerIndex != from && c.Validated)
+						DispatchFrameToClient(c, from, frameData);
+
+			pendingRelays.Clear();
+		}
+
 		void CloseDueFrames()
 		{
 			if (frameScheduler == null || State != ServerState.GameStarted)
 				return;
 
+			var closedAny = false;
 			while (frameScheduler.TryCloseFrame(Game.RunTime, out var frame, out var contents))
 			{
-				foreach (var (client, data, packetCount) in contents)
+				closedAny = true;
+
+				// Every client gets one packet per other client plus an ack: hold the sends so that each
+				// connection writes them all at once instead of waking its send thread for each one
+				var held = Conns.ToList();
+				foreach (var c in held)
+					c.HoldSends();
+
+				try
 				{
-					// The client may have been dropped while this frame was being sent
-					var conn = Conns.FirstOrDefault(c => c.PlayerIndex == client);
-					if (conn == null || !conn.Validated)
-						continue;
+					FlushPendingRelays();
+					foreach (var (client, data, packetCount) in contents)
+					{
+						// The client may have been dropped while this frame was being sent
+						var conn = Conns.FirstOrDefault(c => c.PlayerIndex == client);
+						if (conn == null || !conn.Validated)
+							continue;
 
-					// The disconnect marker for this client must follow its last frame. Update this first, in case
-					// the client gets dropped while the frame is being sent.
-					conn.LastOrdersFrame = frame;
+						// The disconnect marker for this client must follow its last frame. Update this first, in case
+						// the client gets dropped while the frame is being sent.
+						conn.LastOrdersFrame = frame;
 
-					// Forward to everyone else, and tell the sender which frame its packets were applied on
-					DispatchOrdersToClients(conn, frame, data);
-					DispatchFrameToClient(conn, client, CreateAckFrame(frame, (byte)packetCount));
+						// Forward to everyone else, and tell the sender which frame its packets were applied on
+						DispatchOrdersToClients(conn, frame, data);
+						DispatchFrameToClient(conn, client, CreateAckFrame(frame, (byte)packetCount));
+					}
+				}
+				finally
+				{
+					foreach (var c in held)
+						c.ReleaseSends();
+				}
+			}
+
+			if (!closedAny && pendingRelays.Count > 0 && Game.RunTime - oldestPendingRelay > MaxRelayHoldMs)
+			{
+				var held = Conns.ToList();
+				foreach (var c in held)
+					c.HoldSends();
+
+				try
+				{
+					FlushPendingRelays();
+				}
+				finally
+				{
+					foreach (var c in held)
+						c.ReleaseSends();
 				}
 			}
 		}
@@ -2028,6 +2103,7 @@ namespace OpenRA.Server
 						: $"{(minGameSpeed > 0 ? $"{minGameSpeed}%" : "none")} ({players} players{(lobbyMinSpeed.HasValue ? ", set by the admin" : "")})";
 					Log.Write("server", $"Minimum game speed for this game: {floorNote}.");
 
+					pendingRelays.Clear();
 					frameScheduler = new FrameScheduler(gameSpeed.Timestep, LobbyInfo.GlobalSettings.NetFrameInterval,
 						firstFrame + OrderLatency, validConns.Select(c => c.PlayerIndex), Settings.MaxPlayerLag,
 						DescribeClient, message => Log.Write("server", message), spectators, minGameSpeed,

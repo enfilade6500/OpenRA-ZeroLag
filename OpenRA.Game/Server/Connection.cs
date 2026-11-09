@@ -10,7 +10,6 @@
 #endregion
 
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -41,7 +40,16 @@ namespace OpenRA.Server
 
 		long lastReceivedTime = 0;
 
-		readonly BlockingCollection<byte[]> sendQueue = new();
+		// Outgoing packets wait here until the send thread runs, which then writes everything waiting in one
+		// socket call. A frame close queues one packet per other client plus an ack for every connection, so
+		// without this each of those N*N packets per frame cost a thread wake-up and a write of its own, and the
+		// send threads were the largest single CPU cost of the server (see Server.CloseDueFrames, which holds
+		// the sends for the duration of a close so that they go out as exactly one write per client).
+		readonly object sendLock = new();
+		readonly ManualResetEventSlim sendSignal = new(false);
+		List<byte[]> pending = new();
+		bool sendsHeld;
+		bool sendCompleted;
 		readonly ManualResetEventSlim sendLoopExited = new(false);
 		volatile bool receiveLoopExited;
 		volatile bool sendFailed;
@@ -214,9 +222,9 @@ namespace OpenRA.Server
 			var socket = (Socket)s;
 			try
 			{
-				while (!sendQueue.IsCompleted)
+				while (true)
 				{
-					if (!sendQueue.TryTake(out var data, 1000))
+					if (!sendSignal.Wait(1000))
 					{
 						// The socket has been closed from the receive side; nothing more can be sent
 						if (receiveLoopExited)
@@ -225,9 +233,27 @@ namespace OpenRA.Server
 						continue;
 					}
 
-					var start = 0;
-					while (start < data.Length)
-						start += socket.Send(data, start, data.Length - start, SocketFlags.None);
+					// Take everything that is waiting, in order, and write it as one buffer
+					List<byte[]> batch;
+					bool completed;
+					lock (sendLock)
+					{
+						sendSignal.Reset();
+						batch = pending;
+						pending = new List<byte[]>();
+						completed = sendCompleted;
+					}
+
+					if (batch.Count > 0)
+					{
+						var data = batch.Count == 1 ? batch[0] : Concatenate(batch);
+						var start = 0;
+						while (start < data.Length)
+							start += socket.Send(data, start, data.Length - start, SocketFlags.None);
+					}
+
+					if (completed)
+						break;
 				}
 
 				// All queued data has been sent: signal the end of the stream to the client
@@ -244,37 +270,73 @@ namespace OpenRA.Server
 				// The receive loop closed the socket
 				sendFailed = true;
 			}
-			catch (InvalidOperationException)
-			{
-				// The send queue was completed while we were waiting on it
-			}
 			finally
 			{
 				sendLoopExited.Set();
 			}
 		}
 
+		static byte[] Concatenate(List<byte[]> parts)
+		{
+			var total = 0;
+			foreach (var part in parts)
+				total += part.Length;
+
+			var data = new byte[total];
+			var offset = 0;
+			foreach (var part in parts)
+			{
+				Buffer.BlockCopy(part, 0, data, offset, part.Length);
+				offset += part.Length;
+			}
+
+			return data;
+		}
+
 		public bool TrySendData(byte[] data)
 		{
-			if (sendQueue.IsAddingCompleted)
-				return false;
-
-			try
+			lock (sendLock)
 			{
-				sendQueue.Add(data);
+				if (sendCompleted)
+					return false;
+
+				pending.Add(data);
+				if (!sendsHeld)
+					sendSignal.Set();
+
 				return true;
 			}
-			catch (InvalidOperationException)
+		}
+
+		/// <summary>
+		/// Queue outgoing packets without waking the send thread until ReleaseSends, so that a burst of packets
+		/// for this client (a frame close) goes out as one write. Always paired with ReleaseSends.
+		/// </summary>
+		public void HoldSends()
+		{
+			lock (sendLock)
+				sendsHeld = true;
+		}
+
+		public void ReleaseSends()
+		{
+			lock (sendLock)
 			{
-				// Occurs if the collection is marked completed for adding by another thread.
-				return false;
+				sendsHeld = false;
+				if (pending.Count > 0)
+					sendSignal.Set();
 			}
 		}
 
 		public void Dispose()
 		{
-			// Tell the sendReceiveThread that the socket should be closed
-			sendQueue.CompleteAdding();
+			// Tell the send thread to write what is left and close the stream
+			lock (sendLock)
+			{
+				sendCompleted = true;
+				sendsHeld = false;
+				sendSignal.Set();
+			}
 		}
 	}
 

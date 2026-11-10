@@ -942,8 +942,70 @@ static class Tests
 		Check(Drain(s, 3500).Count == 1, "start delay: the first frame closes once the delay is over");
 	}
 
+	// ServerLoad: on-time closes keep up; a close more than a period late loses that time and lowers the reported speed;
+	// the log line is rate limited; !speed's verdict remembers the last three windows; the summary counts the bad ones.
+	static void ServerLoadMeasuresLostTimeAndRateLimits()
+	{
+		var load = new ServerLoad();
+		const double Period = 120.0;
+		long now = 1000;
+		double scheduled = now;
+
+		// Feeds closes for a little over one window, each one `lateFor(i)` ms late, and returns what Update said when
+		// the window closed (the closes past the boundary start the next window; the cadence is uniform, so it does
+		// not matter where the boundary falls)
+		string Window(Func<int, long> lateFor)
+		{
+			string line = null;
+			var closed = false;
+			var windowStart = now;
+			for (var i = 0; now - windowStart < ServerLoad.WindowMs + Period || !closed; i++)
+			{
+				// The frame due at `scheduled` closes `late` ms after that; the scheduler then restarts from now if it was
+				// more than a period late, else keeps to the schedule (FrameScheduler.TryCloseFrame)
+				var late = lateFor(i);
+				now = (long)scheduled + late;
+				load.NoteClose(now, scheduled, Period);
+				load.NoteEventWait(1);
+				scheduled = late > Period ? now + Period : scheduled + Period;
+				var result = load.Update(now);
+				if (result != null)
+					line = result;
+
+				// Update returns null for a good window too: detect the close by the window changing
+				if (!closed && now - windowStart >= ServerLoad.WindowMs)
+					closed = true;
+			}
+
+			return line;
+		}
+
+		Check(Window(i => 0) == null, "serverload: an on-time window logs nothing");
+		Check(load.HasWindow && load.Speed > 0.99f && load.KeepingUp, $"serverload: an on-time window is 100% ({load.Speed:F3}) and keeping up");
+
+		// Every fourth close 300 ms late: more than a period, so the schedule restarts and 300 ms is lost per 780 ms
+		var line = Window(i => i % 4 == 3 ? 300 : 0);
+		var expected = 1f - 300f / 780f;
+		Check(line != null && line.StartsWith("Server not keeping up:"), "serverload: a window that lost time is logged");
+		Check(Math.Abs(load.Speed - expected) < 0.03f, $"serverload: speed {load.Speed:F3} matches the lost time ({expected:F3})");
+		Check(!load.KeepingUp && load.DescribeForPlayers().Contains("% of real time"), "serverload: players are told the speed");
+
+		// Another bad window right away: counted, but not logged again within LogIntervalMs
+		Check(Window(i => 500) == null, "serverload: a second bad window within 30 s is not logged again");
+
+		// Two good windows: the last window is fine, but the verdict for !speed still remembers the bad ones
+		Window(i => 0);
+		Window(i => 0);
+		Check(load.LastWindowOk && !load.KeepingUp, "serverload: two good windows after a bad one: not yet keeping up");
+
+		Window(i => 0);
+		Check(load.KeepingUp, "serverload: three good windows: keeping up again");
+		Check(load.Summary() != null && load.Summary().Contains("not keeping up in 2 of 6"), "serverload: the summary counts the bad windows: " + load.Summary());
+	}
+
 	static int Main()
 	{
+		ServerLoadMeasuresLostTimeAndRateLimits();
 		FramesAreConsecutiveAndComplete();
 		AckCountsMatchPacketsSent();
 		SilentPlayerBlocksThenResumes();

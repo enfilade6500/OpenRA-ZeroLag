@@ -46,8 +46,9 @@ namespace NetHarness
 			Down = new LinkSpec { BaseMs = 0, JitterMs = 0 },
 		};
 
-		/// <summary>Number of clients in the "crew" scenario (--players).</summary>
+		/// <summary>Number of clients in the "crew" scenario (--players), and of spectators in "crewspec" (--spectators).</summary>
 		public static int Players = 8;
+		public static int Spectators = 4;
 
 		public static readonly Dictionary<string, (string Description, Func<List<PlayerSpec>> Build)> All = new()
 		{
@@ -55,6 +56,10 @@ namespace NetHarness
 
 			["crew"] = ("--players N (default 8) clients with fast PCs and nothing simulated in their paths: a real server across a real network (--host), measured as its players would experience it", () =>
 				Enumerable.Range(1, Players).Select(i => Direct($"p{i}")).ToList()),
+
+			["crewspec"] = ("the crew scenario with --spectators N (default 4) spectators added, to measure what a spectator costs the server", () =>
+				Enumerable.Range(1, Players).Select(i => Direct($"p{i}"))
+					.Concat(Enumerable.Range(1, Spectators).Select(i => { var s = Direct($"s{i}"); s.Spectator = true; return s; })).ToList()),
 
 			["slowlink"] = ("p4 has a long but steady path: ~300ms round trip, +/-30ms jitter", () =>
 			{
@@ -285,6 +290,7 @@ namespace NetHarness
 			FakeClient.DefeatAtFrame = int.Parse(opts.GetValueOrDefault("defeatframe", int.MaxValue.ToString()));
 			FakeClient.Password = opts.GetValueOrDefault("password", "");
 			Scenarios.Players = int.Parse(opts.GetValueOrDefault("players", "8"));
+			Scenarios.Spectators = int.Parse(opts.GetValueOrDefault("spectators", "4"));
 			var (description, build) = Scenarios.All[scenarioName];
 			var specs = build();
 
@@ -389,11 +395,23 @@ namespace NetHarness
 			var voteScript = opts.GetValueOrDefault("votekick", "0") == "1";
 			var voteStage = 0;
 			double nextVoteAction = 0;
+
+			// --speedat 20,40: p1 (the admin) and p2 each ask !speed this many seconds into the measured window; the
+			// replies show with --messages 1. For checking what the server says about itself (Server.ReportServerSpeed).
+			var speedAt = new Queue<double>(opts.GetValueOrDefault("speedat", "").Split(',', StringSplitOptions.RemoveEmptyEntries)
+				.Select(x => double.Parse(x, CultureInfo.InvariantCulture)).OrderBy(x => x));
 			while (Clock.Now < windowEnd && !clients.Any(c => c.Failed))
 			{
 				foreach (var (c, leaveAfter) in leavers)
 					if (!c.Closed && Clock.Now >= windowStart + leaveAfter * 1000)
 						c.Stop();
+
+				while (speedAt.Count > 0 && Clock.Now >= windowStart + speedAt.Peek() * 1000)
+				{
+					speedAt.Dequeue();
+					foreach (var c in clients.Take(2))
+						c.ChatToSend.Enqueue("!speed");
+				}
 
 				if (voteScript && voteStage < 5)
 				{

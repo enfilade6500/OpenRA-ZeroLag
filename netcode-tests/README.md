@@ -118,6 +118,17 @@ Run the same command against a server you know to be good for the control, and w
 `Server.Netcode=classic` on the suspect server if its owner will set it. Other scenarios
 work too, and add their simulated faults on top of the real path.
 
+Alongside real players (you in the lobby as admin, starting the game yourself) add
+`--nosync 1`: the fake clients do not simulate the game, so their sync reports can never
+match a real client's; with it they send none and ignore the ones they receive. On a public
+server a stranger may take a slot while the clients are joining; with `--host` a client that
+ends up in another role than intended carries on in that role and says so in the checks
+(`--anyrole 0` to fail the run instead, as the fault scenarios do). `crewspec` adds
+`--spectators N` spectators, which cost the server what players cost; a map allows at most
+61 playable players (63 player references), spectators are not limited, so 60 players plus
+140 spectators is a 200-connection game a real client can still join. `--speedat 25,55`
+with `--messages 1` has p1 and p2 ask `!speed` at those seconds and prints the replies.
+
 ## Also in this directory
 
 - `src/SchedulerTests.cs` + `tools/run-tests.sh` — the FrameScheduler / announcer unit

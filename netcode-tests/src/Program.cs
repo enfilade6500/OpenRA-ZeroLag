@@ -270,6 +270,20 @@ namespace NetHarness
 	{
 		static int Main(string[] args)
 		{
+			try
+			{
+				return Run(args);
+			}
+			catch (Exception e)
+			{
+				Console.Error.WriteLine($"harness error: {e.GetType().Name}: {e.Message}");
+				Console.Error.WriteLine(e.StackTrace);
+				return 3;
+			}
+		}
+
+		static int Run(string[] args)
+		{
 			var opts = ParseArgs(args);
 			var port = int.Parse(opts.GetValueOrDefault("port", "21234"));
 			var scenarioName = opts.GetValueOrDefault("scenario", "clean");
@@ -285,6 +299,7 @@ namespace NetHarness
 			FakeClient.MapRaceUid = opts.GetValueOrDefault("maprace", null);
 			FakeClient.LobbyHoldMs = long.Parse(opts.GetValueOrDefault("lobbyhold", "0"), CultureInfo.InvariantCulture);
 			FakeClient.NoSync = opts.GetValueOrDefault("nosync", "0") == "1";
+			FakeClient.AnyRole = opts.GetValueOrDefault("anyrole", opts.ContainsKey("host") ? "1" : "0") == "1";
 			FakeClient.LobbyOnly = opts.GetValueOrDefault("lobbyonly", "0") == "1";
 			FakeClient.DefeatBit = int.Parse(opts.GetValueOrDefault("defeatbit", "-1"));
 			FakeClient.DefeatAtFrame = int.Parse(opts.GetValueOrDefault("defeatframe", int.MaxValue.ToString()));
@@ -444,6 +459,10 @@ namespace NetHarness
 				c.Stop();
 
 			var extraChecks = new List<string>();
+			foreach (var c in all)
+				if (c.RoleNote != null)
+					extraChecks.Add($"{c.Metrics.Name}: {c.RoleNote}");
+
 			foreach (var l in lurkers)
 				extraChecks.Add($"{l.Metrics.Name}: kicked={(l.Closed ? "yes" : "NO")}, got kick message before disconnect={(l.GotServerError ? "yes" : "NO")}");
 
@@ -645,7 +664,7 @@ namespace NetHarness
 
 			// Lockstep check: every client must have produced the same order-stream hash for every frame they all processed
 			var common = clients.Select(c => c.Metrics.SyncHashes.Keys.ToHashSet()).Aggregate((a, b) => { a.IntersectWith(b); return a; });
-			var mismatches = common.Where(f => clients.Select(c => c.Metrics.SyncHashes[f]).Distinct().Count() > 1).OrderBy(f => f).ToList();
+			var mismatches = common.Where(f => clients.Where(c => c.Metrics.SyncHashes.ContainsKey(f)).Select(c => c.Metrics.SyncHashes[f]).Distinct().Count() > 1).OrderBy(f => f).ToList();
 			var fatals = clients.Where(c => c.Metrics.Fatal != null).Select(c => c.Metrics.Fatal).ToList();
 			var ok = mismatches.Count == 0 && fatals.Count == 0 && common.Count > 0;
 			var detail = ok ? $"all {clients.Count} clients agree on {common.Count} frames"

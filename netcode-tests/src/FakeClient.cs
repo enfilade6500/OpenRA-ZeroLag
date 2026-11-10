@@ -153,6 +153,13 @@ namespace NetHarness
 		public static long LobbyHoldMs;
 		double allReadyAt = -1;
 
+		/// <summary>--anyrole: a client that ends up in a different role than intended (a stranger took its slot) carries on
+		/// in that role instead of failing the run. On by default with --host.</summary>
+		public static bool AnyRole;
+
+		/// <summary>What happened to this client's role, if it was not the intended one (see AnyRole).</summary>
+		public string RoleNote;
+
 		/// <summary>--nosync: send no sync packets at all, like a client whose game never reports them, and do not compare
 		/// the ones received: for a game shared with real clients, whose hashes are of the real world.</summary>
 		public static bool NoSync;
@@ -837,7 +844,17 @@ namespace NetHarness
 			// turning an intended player into an observer), which would invalidate the comparison
 			var me = LobbyInfo.Clients.FirstOrDefault(c => c.Index == clientId);
 			if (me != null && me.IsObserver != Spectator)
-				Fail($"role mismatch at game start: intended {(Spectator ? "spectator" : "player")} but lobby has me as {(me.IsObserver ? "observer" : "player")} (map has too few slots?)");
+			{
+				// On a public server someone else may take a slot while the clients are joining; with --anyrole the
+				// client carries on in whatever role the lobby gave it and says so in the checks
+				if (AnyRole)
+				{
+					RoleNote = $"intended {(Spectator ? "spectator" : "player")}, joined as {(me.IsObserver ? "spectator" : "player")} (slot taken by someone else, or the map has too few)";
+					Spectator = me.IsObserver;
+				}
+				else
+					Fail($"role mismatch at game start: intended {(Spectator ? "spectator" : "player")} but lobby has me as {(me.IsObserver ? "observer" : "player")} (map has too few slots? --anyrole 1 to carry on regardless)");
+			}
 
 			netFrameInterval = LobbyInfo.GlobalSettings.NetFrameInterval;
 			netFrameNumber = 1;

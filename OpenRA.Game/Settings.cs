@@ -192,6 +192,12 @@ namespace OpenRA
 			"Off by default: it is for studying the netcode, and the server log already has every slowdown and its cause.")]
 		public bool PaceLog = false;
 
+		[Desc("Multiplayer games: whether !speed also tells players when the server itself is not keeping up (frames " +
+			"closing late, scheduled time lost, packets waiting in its queue: what an overloaded host looks like). " +
+			"\"off\" (default): never; the server log still records it. \"admins\": only the lobby admin is told. " +
+			"\"on\": everyone who asks. Players are never told unprompted.")]
+		public string ReportServerSpeed = "off";
+
 		[Desc("For dedicated servers only, treat maps that fail the lint checks as invalid.")]
 		public bool EnableLintChecks = true;
 

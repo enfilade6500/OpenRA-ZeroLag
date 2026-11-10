@@ -169,7 +169,8 @@ namespace OpenRA.Server
 
 		volatile ServerState internalState = ServerState.WaitingPlayers;
 
-		readonly BlockingCollection<IServerEvent> events = new();
+		// Each event carries the time it was queued, so the loop can tell how long it waited (ServerLoad)
+		readonly BlockingCollection<(long Queued, IServerEvent Event)> events = new();
 
 		ReplayRecorder recorder;
 		GameInformation gameInfo;
@@ -297,7 +298,7 @@ namespace OpenRA.Server
 							{
 								try
 								{
-									events.Add(new ConnectionConnectEvent(listener.AcceptSocket()));
+									events.Add((Game.RunTime, new ConnectionConnectEvent(listener.AcceptSocket())));
 								}
 								catch (Exception)
 								{
@@ -394,9 +395,21 @@ namespace OpenRA.Server
 							timeout = Math.Min(timeout, (int)Math.Max(0, MaxRelayHoldMs - (Game.RunTime - oldestPendingRelay)));
 
 						if (events.TryTake(out var e, timeout))
-							e.Invoke(this);
+						{
+							if (frameScheduler != null && State == ServerState.GameStarted)
+								frameScheduler.Load.NoteEventWait(Game.RunTime - e.Queued);
+
+							e.Event.Invoke(this);
+						}
 
 						CloseDueFrames();
+
+						if (frameScheduler != null && State == ServerState.GameStarted)
+						{
+							var notKeepingUp = frameScheduler.Load.Update(Game.RunTime);
+							if (notKeepingUp != null)
+								Log.Write("server", notKeepingUp);
+						}
 
 						// PERF: Dedicated servers need to drain the action queue to remove references blocking the GC from cleaning up disposed objects.
 						if (Type == ServerType.Dedicated)
@@ -466,17 +479,17 @@ namespace OpenRA.Server
 
 		internal void OnConnectionPacket(Connection conn, int frame, byte[] data)
 		{
-			events.Add(new ConnectionPacketEvent(conn, frame, data));
+			events.Add((Game.RunTime, new ConnectionPacketEvent(conn, frame, data)));
 		}
 
 		internal void OnConnectionPing(Connection conn, int[] pingHistory, byte queueLength)
 		{
-			events.Add(new ConnectionPingEvent(conn, pingHistory, queueLength));
+			events.Add((Game.RunTime, new ConnectionPingEvent(conn, pingHistory, queueLength)));
 		}
 
 		internal void OnConnectionDisconnect(Connection conn)
 		{
-			events.Add(new ConnectionDisconnectEvent(conn));
+			events.Add((Game.RunTime, new ConnectionDisconnectEvent(conn)));
 		}
 
 		void AcceptConnection(Socket socket)
@@ -721,7 +734,7 @@ namespace OpenRA.Server
 							Log.Write("server", ex.ToString());
 						}
 
-						events.Add(new CallbackEvent(() =>
+						events.Add((Game.RunTime, new CallbackEvent(() =>
 						{
 							var notAuthenticated = Type == ServerType.Dedicated && profile == null && (Settings.RequireAuthentication || Settings.ProfileIDWhitelist.Length > 0);
 							var blacklisted = Type == ServerType.Dedicated && profile != null && Settings.ProfileIDBlacklist.Contains(profile.ProfileID);
@@ -746,7 +759,7 @@ namespace OpenRA.Server
 							}
 							else
 								CompleteConnection();
-						}));
+						})));
 					});
 				}
 				else
@@ -1467,6 +1480,20 @@ namespace OpenRA.Server
 		}
 
 		/// <summary>!minspeed: the speed floor; the lobby admin sets the next game's with !minspeed &lt;percent&gt; (0: none; auto: the server's table).</summary>
+		bool MayReportServerSpeed(Connection conn)
+		{
+			switch (Settings.ReportServerSpeed?.ToLowerInvariant())
+			{
+				case "on":
+					return true;
+				case "admins":
+				case "admin":
+					return LobbyInfo.ClientWithIndex(conn.PlayerIndex)?.IsAdmin ?? false;
+				default:
+					return false;
+			}
+		}
+
 		void SendMinSpeedReply(Connection conn, string argument)
 		{
 			if (State == ServerState.GameStarted)
@@ -1555,6 +1582,10 @@ namespace OpenRA.Server
 
 				if (!WantsSpeedChanges(conn.PlayerIndex))
 					reply += " (!speed on: be told of every change.)";
+
+				// The server's own state, for those the host allows to see it (Server.ReportServerSpeed)
+				if (!frameScheduler.Load.KeepingUp && MayReportServerSpeed(conn))
+					reply += " " + frameScheduler.Load.DescribeForPlayers();
 
 				SendOrderTo(conn, "Message", reply);
 				return true;

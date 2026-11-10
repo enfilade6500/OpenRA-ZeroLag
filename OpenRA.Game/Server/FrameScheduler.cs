@@ -439,6 +439,9 @@ namespace OpenRA.Server
 		/// </summary>
 		public Action<string> Trace { get; set; }
 
+		/// <summary>Whether the server itself keeps up (frame closes against this clock, lost time, the event queue).</summary>
+		public ServerLoad Load { get; } = new();
+
 		/// <summary>Creates a scheduler for one game.</summary>
 		/// <param name="timestep">World tick length for the selected game speed (ms).</param>
 		/// <param name="netFrameInterval">World ticks per network frame.</param>
@@ -819,6 +822,14 @@ namespace OpenRA.Server
 				SpeedBackUp($"{describeClient(client)} has left");
 
 			clients.Remove(client);
+
+			// The last one out: how the server itself did
+			if (clients.Count == 0)
+			{
+				var summary = Load.Summary();
+				if (summary != null)
+					log(summary);
+			}
 		}
 
 		/// <summary>How long the server loop may sleep before this needs attention again (ms).</summary>
@@ -972,6 +983,7 @@ namespace OpenRA.Server
 
 			// Keep to the schedule, unless we have fallen more than a frame behind (e.g. after being blocked)
 			var period = FramePeriod;
+			Load.NoteClose(now, nextCloseTime, period);
 			nextCloseTime = now - nextCloseTime > period ? now + period : nextCloseTime + period;
 
 			return true;
@@ -1387,7 +1399,7 @@ namespace OpenRA.Server
 			{
 				traceHeaderWritten = true;
 				Trace("time_ms,frame,client,role,lag_frames,min_lag_frames,backlog_frames,behind_ms,buffer_ms,queue_frames,queue_max_frames," +
-					"queue_age_ms,rtt_ms,speed_pct,told_pct,peak_speed_pct,slowest_speed_pct,hole,name");
+					"queue_age_ms,rtt_ms,speed_pct,told_pct,peak_speed_pct,slowest_speed_pct,hole,name,server_speed_pct,server_late_ms,server_queue_ms");
 			}
 
 			foreach (var (index, state) in clients)
@@ -1407,7 +1419,9 @@ namespace OpenRA.Server
 					now.ToString(ic), (nextFrame - 1).ToString(ic), index.ToString(ic), role,
 					state.LagFrames.ToString(ic), minLag, state.Backlog.ToString(ic), behindMs, state.TargetSlack.ToString(ic),
 					queue, queueMax, queueAge, rtt,
-					(100 / pace).ToString("F0", ic), (state.RequestedSpeed * 100).ToString("F0", ic), peak, slowest, hole, name));
+					(100 / pace).ToString("F0", ic), (state.RequestedSpeed * 100).ToString("F0", ic), peak, slowest, hole, name,
+					Load.HasWindow ? (Load.Speed * 100).ToString("F0", ic) : "", Load.HasWindow ? Load.LateMean.ToString("F0", ic) : "",
+					Load.HasWindow ? Load.QueueMean.ToString("F0", ic) : ""));
 
 				// The most seen since the last line starts over from the latest reading
 				state.ReportedQueueMax = state.ReportedQueue;

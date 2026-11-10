@@ -621,6 +621,32 @@ still be the wrong machine: ZeroLag keeps clients 150 ms behind the server, so a
 that is not scheduled on time stalls them where stock's 400 ms lead would hide it, and a
 burstable VM that has spent its credit is exactly such a process.
 
+## v1.6 (in progress): the server measures itself
+
+Everything above measures the players. The shared-core server's games ran at 61% speed
+with `!speed` saying full speed because nothing in the server looked at the server: when the
+loop runs more than a period late, `TryCloseFrame` restarts the schedule from now and the
+missed time is simply gone, so a starved host runs the game slower in real time without any
+pacing having been decided, and nothing records it.
+
+`ServerLoad` now watches three things per 10-second window: how late each frame closed
+against the scheduler's own clock, how much scheduled time was lost to those restarts (the
+server's own speed, the exact analogue of a client's), and how long incoming packets waited
+in the event queue before the loop took them (the number that grows without bound when the
+loop is saturated: 34 s in the 30-client run). A window below 95% speed, more than 50 ms
+late on average or with packets waiting more than 100 ms is logged, at most once per 30 s,
+and the end-of-game summary counts the bad windows. The pace log carries the three numbers
+as columns. `Server.ReportServerSpeed` (`off` by default, `admins`, `on`) lets `!speed` add
+"The server itself has been delivering frames at 87% of real time: its host is not keeping
+up." for the lobby admin or for everyone; the verdict covers the last three windows, so a
+brief good spell in a bad stretch does not hide it. Nobody is told unprompted: the log is
+the owner's, and a server's players are not the ones who can act on it.
+
+Tested by running the server under `cpulimit -l 5` with 12 harness clients: the clients
+measured 85% speed, the server reported 87% in its log and to the admin, and 83.7% over
+the game in its summary; untouched, it reports 100% and logs nothing, and costs nothing
+measurable.
+
 ## Testing
 
 `netcode-tests/` contains a harness of headless clients over simulated bad connections,

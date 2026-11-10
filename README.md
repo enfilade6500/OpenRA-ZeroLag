@@ -101,11 +101,15 @@ server. See [SERVER-INSTALL.md](SERVER-INSTALL.md) for a step-by-step version wi
 | `Server.ShowMapBriefing` | `False` | Print the map's briefing text (`MissionData` → `Briefing`) in the lobby chat when the map is chosen and to each player who joins, as stock does. Off by default because maps use it for long change logs that push the chat off the screen: players get one line saying the map has a description and that `!map` shows it. |
 | `Server.LobbyOptions` | `explored=True,reusable-engineers=True,bounty=True` | Lobby options the server prefers, as `id=value` pairs: applied to every map that offers the option and does not lock it, in place of the map's default, as if the admin had set them; the admin can still change them for their game. `none` leaves the maps' own defaults alone. They are put back (and every other option back to its map default) after every game and whenever the lobby empties, so the next group starts from the host's settings. Players joining are told which options differ from the map's defaults, as stock does for an admin's changes. |
 | `Server.PaceLog` | `False` | Dedicated servers: write `Logs/zerolag-pace.log`, one line per player per second with what the server measures about the player (frames behind, of which in flight and backlog, ms behind, buffer, speed asked of them) next to what the player's own game reports in its ping replies (frames received but not yet run). CSV with a header line; a few MB per hour of a full game. Nothing is decided from it; the server log already has every slowdown and its cause, so this is for studying the netcode. |
+| `Server.ReportServerSpeed` | `off` | Whether `!speed` also says when the server itself is not keeping up (frames closing late, scheduled time lost, packets waiting in its queue: an overloaded host). `off`: never; the server log still records it. `admins`: the lobby admin is told. `on`: everyone who asks. Nobody is told unprompted. (v1.6) |
 
 **The server log** (`Logs/dedicated-server.log`) records every slowdown with the player's
 name and what their computer managed, every dropout that was turned into buffer, lists
 players who are behind every 10 s (and why), and writes a one-line summary for each player
 when they leave, including their connection's dropouts. `grep -E "Slowing|full speed|behind|dropped out|Summary for"` is a good start.
+Since v1.6 the server also measures itself: `Server not keeping up: delivered 87% of frames in
+the last 10s ...` means the machine, not a player, is the problem (see the host section above),
+and `Server summary:` at the end of each game says how it did overall.
 
 **The pace log** (`Logs/zerolag-pace.log`, v1.4) is the same story as numbers, once a second per
 player: the server's estimate of how far behind each player is and how much of that is their own

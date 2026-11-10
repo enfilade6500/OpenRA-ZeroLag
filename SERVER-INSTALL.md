@@ -187,7 +187,7 @@ sudo tar czf ~/openra-$(hostname)-$(date +%F).tgz -C /var/lib/openra --exclude='
 ## Reading the log
 
 ```sh
-grep -E "Netcode:|Slowing|too slow|caught up|full speed|behind|dropped out|buffer|waiting|waited|paused|Summary for|vote" Logs/dedicated-server.log
+grep -E "Netcode:|Slowing|too slow|caught up|full speed|behind|dropped out|buffer|waiting|waited|paused|Summary for|Server not keeping up|Server summary|vote" Logs/dedicated-server.log
 ```
 
 - `Slowing the game to 78% ... so that Name can keep up (their computer is managing 80% ...)` —
@@ -214,6 +214,15 @@ grep -E "Netcode:|Slowing|too slow|caught up|full speed|behind|dropped out|buffe
   packets were delayed 40 time(s), 15.2s in total (their game kept running).` — one line per
   player when they leave. "Dropped out" stopped their game; "delayed" only held up their
   packets (a bursty or congested line) and cost nobody anything but their own commands.
+- `Server not keeping up: delivered 87% of frames in the last 10s; frames closed 21 ms late
+  on average (max 338 ms); incoming packets waited 0 ms on average (max 5 ms). The host is
+  overloaded, or not scheduling the server on time.` (v1.6) — the server measuring itself, at
+  most once per 30 s. This is the machine, not a player: everyone sees stutter at "full
+  speed", and no player is named because none is to blame. A shared-core cloud VM that has
+  run out of CPU credit looks exactly like this. `Server summary: delivered 83.7% of frames in
+  real time; ... The server was not keeping up in 5 of 6 10-second windows.` closes the game.
+  `Server.ReportServerSpeed=admins` (or `on`) lets `!speed` tell the lobby admin (or everyone)
+  the same; off by default.
 
 Note that the stock server truncates `dedicated-server.log` every time the process starts;
 copy it, or rotate it from your service manager, if you want to keep it. Server-side replays

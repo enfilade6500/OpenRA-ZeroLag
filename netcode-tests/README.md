@@ -128,7 +128,26 @@ ends up in another role than intended carries on in that role and says so in the
 61 playable players (63 player references), spectators are not limited, so 60 players plus
 140 spectators is a 200-connection game a real client can still join. `--speedat 25,55`
 with `--messages 1` has p1 and p2 ask `!speed` at those seconds and prints the replies;
-`--speedevery 30` asks every 30 s.
+`--speedevery 30` asks every 30 s. `--messages 1` prints what the server said to p1 and p2
+(the two that talk to it), with repeated notices collapsed (`60x [p1 p3 ...] has stopped
+responding...`); `--messages 2` prints every client's.
+
+A load test from one machine has a failure mode of its own: a hundred clients in one
+process stall as one when the process does (a full garbage collection, the OS paging, the
+CPU taken by something else), and from the clients' side that is indistinguishable from the
+server stalling: every client sees the same gap at the same moment. So the harness watches
+its own machine with a thread that only sleeps, and the checks say which it was:
+
+    check: longest gap: 18384 ms on p1, 612.0 s into the measured window; 100 of 100 clients had their longest gap at that moment
+    check: harness host: STALLED 1 time(s) for over 100 ms in the measured window, longest 18380 ms at 612.0 s (...). A gap of that length on every client at that moment is this machine, not the server.
+
+whereas `harness host: no stalls over 100 ms in the measured window` with a gap on every
+client means the server (or the path to it): a ZeroLag v1.6 server's log then has a
+`Server not keeping up` line for the same moment if it was the server itself. Memory is
+the usual reason for a stall: every client keeps every packet it receives for the replay
+check at the end, which at a hundred clients and sixty players is close to a million small
+objects a second, so above 16 clients only p1 keeps its packets (`--record all` to keep
+every client's for the replay check, `--record none` for none; `--replay` needs p1's).
 
 `--replay NAME` writes p1's view of the game as `NAME.orarep`, the same bytes the release
 client's own recorder would have written minus the sync reports, so the real game can play

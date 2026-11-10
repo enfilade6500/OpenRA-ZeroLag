@@ -134,6 +134,19 @@ namespace NetHarness
 		/// <summary>This client joins as a spectator (no slot).</summary>
 		public bool Spectator;
 		bool spectateSent;
+
+		/// <summary>
+		/// Whether this client keeps every packet it receives (Metrics.Recording), for the replay check at the end
+		/// and for --replay. Every other player's orders and sync report arrive every frame, so at a hundred clients
+		/// that is close to a million small objects a second in one process: a load test keeps p1's only.
+		/// </summary>
+		public bool Recording = true;
+
+		void Record((int ClientId, byte[] Packet) packet)
+		{
+			if (Recording)
+				Metrics.Recording.Add(packet);
+		}
 		public volatile bool GotServerError;
 		public volatile bool Closed;
 
@@ -499,7 +512,7 @@ namespace NetHarness
 			{
 				var immediate = new OrderPacket(localImmediateOrders.ToArray()).Serialize(0);
 				Send(immediate);
-				Metrics.Recording.Add((clientId, immediate));
+				Record((clientId, immediate));
 			}
 
 			localImmediateOrders.Clear();
@@ -561,7 +574,7 @@ namespace NetHarness
 				queuedSyncPackets.Enqueue(OrderIO.SerializeSync((netFrameNumber, hash, defeatState)));
 
 			ReceiveSync(netFrameNumber, hash);
-			Metrics.Recording.Add((clientId, OrderIO.SerializeSync((netFrameNumber, hash, defeatState))));
+			Record((clientId, OrderIO.SerializeSync((netFrameNumber, hash, defeatState))));
 			Metrics.FramesProcessed = netFrameNumber;
 			netFrameNumber++;
 		}
@@ -650,7 +663,7 @@ namespace NetHarness
 					if (GameStarted && pendingOrders.TryGetValue(disconnect.ClientId, out var q))
 						q.Enqueue((disconnect.Frame, null, true));
 
-					Metrics.Recording.Add((p.FromClient, p.Data));
+					Record((p.FromClient, p.Data));
 				}
 				else if (OrderIO.TryParseSync(p.Data, out var sync))
 				{
@@ -659,7 +672,7 @@ namespace NetHarness
 					if (!NoSync)
 						ReceiveSync(sync.Frame, sync.SyncHash);
 
-					Metrics.Recording.Add((p.FromClient, p.Data));
+					Record((p.FromClient, p.Data));
 				}
 				else if (OrderIO.TryParseTickScale(p, out var scale))
 				{
@@ -695,7 +708,7 @@ namespace NetHarness
 
 					var serialized = packet.Serialize(ackFrame);
 					ReceiveOrders(clientId, ackFrame, serialized);
-					Metrics.Recording.Add((clientId, serialized));
+					Record((clientId, serialized));
 				}
 				else if (OrderIO.TryParseOrderPacket(p.Data, out var orders))
 				{
@@ -704,7 +717,7 @@ namespace NetHarness
 					else
 						ReceiveOrders(p.FromClient, orders.Frame, p.Data);
 
-					Metrics.Recording.Add((p.FromClient, p.Data));
+					Record((p.FromClient, p.Data));
 				}
 				else
 					Fail($"Received unknown packet from client {p.FromClient} with length {p.Data.Length}");

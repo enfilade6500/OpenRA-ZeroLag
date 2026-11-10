@@ -309,6 +309,21 @@ namespace NetHarness
 			var (description, build) = Scenarios.All[scenarioName];
 			var specs = build();
 
+			// --record all|first|none: which clients keep every packet they receive, for the replay check at the end
+			// and for --replay. Every client records up to RecordAllUpTo clients; above that only p1 does, because a
+			// hundred clients recording sixty players' orders and sync reports every frame is a million small
+			// objects a second in one process, and the full garbage collections over that stall every client at once.
+			var record = opts.GetValueOrDefault("record", specs.Count <= RecordAllUpTo ? "all" : "first");
+			if (record != "all" && record != "first" && record != "none")
+			{
+				Console.Error.WriteLine($"--record {record}: expected all, first or none");
+				return 2;
+			}
+
+			// The machine running the harness is watched for stalls of its own, so that a gap every client sees at
+			// the same moment can be laid at the right door (see HostWatch)
+			using var hostWatch = new HostWatch();
+
 			// --host NAME-OR-IP: a server across a real network instead of one on this machine. The clients still go
 			// through the local proxies, so a scenario's simulated path is added on top of the real one; the "crew"
 			// scenario adds nothing.
@@ -335,6 +350,7 @@ namespace NetHarness
 				var proxy = new DelayProxy(server, s.Up, s.Down, seed * 100 + i);
 				proxies.Add(proxy);
 				var c = new FakeClient(s.Name, s.Cpu, seed * 1000 + i, specs.Count(x => !x.NeverReady), ordersPerSecond) { NeverReady = s.NeverReady, ExpectedTotalClients = specs.Count, Spectator = s.Spectator, ExpectKick = s.ExpectKick };
+				c.Recording = record == "all" || (record == "first" && i == 0);
 				c.Metrics.Link = $"up {s.Up} / down {s.Down}";
 				clients.Add(c);
 				c.Connect(new IPEndPoint(IPAddress.Loopback, proxy.Port));
@@ -373,7 +389,7 @@ namespace NetHarness
 				Thread.Sleep(1000);
 				var lobbyChecks = new List<string>();
 				foreach (var c in clients)
-					lobbyChecks.Add($"{c.Metrics.Name} saw: " + string.Join(" | ", c.ServerMessages.Select(m => m.Text.Replace("\n", "\\n"))));
+					lobbyChecks.Add($"{c.Metrics.Name} saw: " + DescribeMessages(c.ServerMessages.Select(m => m.Text)));
 				var lobbyOptions = clients[0].LobbyInfo?.GlobalSettings?.LobbyOptions;
 				if (lobbyOptions != null)
 					lobbyChecks.Add("lobby options: " + string.Join(", ", lobbyOptions.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key}={kv.Value.Value}")));
@@ -474,7 +490,9 @@ namespace NetHarness
 			// --replay NAME: p1's view of the game as an OpenRA replay the real game can play, chat included
 			if (opts.TryGetValue("replay", out var replayPath))
 			{
-				try
+				if (!clients[0].Recording)
+					extraChecks.Add("replay not written: p1 kept no packets (--record none)");
+				else try
 				{
 					var written = clients[0].WriteReplay(replayPath);
 					extraChecks.Add(written != null ? $"replay written: {written} (p1's view; needs the map installed to play)" : "replay not written: p1 never saw the lobby");
@@ -499,11 +517,11 @@ namespace NetHarness
 				{
 					var minAfter = voters.Min(x => x.Metrics.FramesProcessed) - k.Metrics.FramesProcessed;
 					extraChecks.Add($"{k.Metrics.Name}: kicked by vote={(k.Closed && k.GotServerError ? "yes" : "NO")} at frame {k.Metrics.FramesProcessed}; the others kept going for {minAfter} more frames");
-					extraChecks.Add($"{k.Metrics.Name} saw: " + string.Join(" | ", k.ServerMessages.Select(m => m.Text)));
+					extraChecks.Add($"{k.Metrics.Name} saw: " + DescribeMessages(k.ServerMessages.Select(m => m.Text)));
 				}
 
 				foreach (var v in voters)
-					extraChecks.Add($"{v.Metrics.Name} saw: " + string.Join(" | ", v.ServerMessages.Select(m => m.Text)));
+					extraChecks.Add($"{v.Metrics.Name} saw: " + DescribeMessages(v.ServerMessages.Select(m => m.Text)));
 
 				if (voteStage < 5 || kicked.Any(k => !k.Closed || !k.GotServerError))
 					extraChecks.Add("VOTE KICK FAIL: " + (voteStage < 5 ? $"script only reached stage {voteStage}" : "slowest player not kicked"));
@@ -524,7 +542,8 @@ namespace NetHarness
 
 			// Client-side replays must still play back correctly
 			var replayFailures = 0;
-			foreach (var c in clients)
+			var recorded = clients.Where(c => c.Recording).ToList();
+			foreach (var c in recorded)
 			{
 				var latency = c.WorldTimestep switch { 80 => 2, 50 => 3, 40 => 3, 35 => 4, 30 => 4, 20 => 6, _ => 3 };
 				var (replayOk, replayDetail) = ReplayCheck.Check(c.Metrics, latency);
@@ -534,18 +553,38 @@ namespace NetHarness
 					extraChecks.Add($"{c.Metrics.Name}: REPLAY FAIL: {replayDetail}");
 				}
 				else if (c == clients[0])
-					extraChecks.Add($"{c.Metrics.Name}: {replayDetail} (all other clients' replays checked too)");
+					extraChecks.Add($"{c.Metrics.Name}: {replayDetail}" + (recorded.Count == clients.Count
+						? " (all other clients' replays checked too)"
+						: $" (p1's only: with {all.Count} clients the others did not keep their packets; --record all makes them)"));
 			}
 
-			var result = Summarize(label, scenarioName, description, clients, windowStart, Math.Min(windowEnd, Clock.Now));
+			if (recorded.Count == 0)
+				extraChecks.Add("replays not checked (--record none)");
+
+			var measuredEnd = Math.Min(windowEnd, Clock.Now);
+			var result = Summarize(label, scenarioName, description, clients, windowStart, measuredEnd);
 			if (replayFailures > 0)
 				result.LockstepOk = false;
-			// --messages 1: list every system line each client received from the server (lobby and game), for checking
-			// what the server says and does not say
-			if (opts.GetValueOrDefault("messages", "0") == "1")
+
+			// The longest gap any client saw, and when, next to what this machine was doing at the time
+			var worstGap = result.Clients.Where(c => !double.IsNaN(c.MaxGapMs)).OrderByDescending(c => c.MaxGapMs).FirstOrDefault();
+			if (worstGap != null && worstGap.MaxGapMs >= HostWatch.StallThresholdMs)
 			{
-				foreach (var c in all)
-					extraChecks.Add($"{c.Metrics.Name} saw: " + string.Join(" | ", c.ServerMessages.Select(m => m.Text.Replace("\n", "\\n"))));
+				var sameMoment = result.Clients.Count(c => Math.Abs(c.MaxGapAtSec - worstGap.MaxGapAtSec) < 1 && c.MaxGapMs > worstGap.MaxGapMs * 0.8);
+				extraChecks.Add(string.Format(CultureInfo.InvariantCulture, "longest gap: {0:F0} ms on {1}, {2:F1} s into the measured window; {3} of {4} clients had their longest gap at that moment",
+					worstGap.MaxGapMs, worstGap.Name, worstGap.MaxGapAtSec, sameMoment, result.Clients.Count));
+			}
+
+			extraChecks.Add(hostWatch.Describe(windowStart, measuredEnd));
+
+			// --messages 1: the system lines the first two clients received from the server (lobby and game; they are
+			// the ones that talk to it: --chat, --command, --speedat, --speedevery), for checking what the server says
+			// and does not say; --messages 2: every client's
+			var messages = opts.GetValueOrDefault("messages", "0");
+			if (messages == "1" || messages == "2")
+			{
+				foreach (var c in messages == "2" ? all : all.Take(2))
+					extraChecks.Add($"{c.Metrics.Name} saw: " + DescribeMessages(c.ServerMessages.Select(m => m.Text)));
 
 				// ...and the lobby options as the first client last saw them (what Server.LobbyOptions set)
 				var options = all[0].LobbyInfo?.GlobalSettings?.LobbyOptions;
@@ -589,6 +628,8 @@ namespace NetHarness
 			public double FreezesPerMin { get; set; }
 			public double FrozenMsPerMin { get; set; }
 			public double MaxGapMs { get; set; }
+			/// <summary>When the longest gap began, in seconds into the measured window.</summary>
+			public double MaxGapAtSec { get; set; }
 			public double GapP99Ms { get; set; }
 			public double OwnLatencyP50 { get; set; }
 			public double OwnLatencyP95 { get; set; }
@@ -636,6 +677,7 @@ namespace NetHarness
 				var ticks = m.TickWallTimes.Where(t => t >= t0 && t <= t1).ToList();
 				var gaps = ticks.Zip(ticks.Skip(1), (a, b) => b - a).ToList();
 				var freezes = gaps.Where(g => g >= FreezeThresholdMs).ToList();
+				var maxGapAt = gaps.Count > 0 ? (ticks[gaps.IndexOf(gaps.Max())] - t0) / 1000 : double.NaN;
 
 				// Time-weighted share of the window where a non-1 tick scale was in force
 				double scaled = 0, current = 1, last = t0;
@@ -673,6 +715,7 @@ namespace NetHarness
 					FreezesPerMin = freezes.Count / (windowMs / 60000),
 					FrozenMsPerMin = freezes.Sum(g => g - c.WorldTimestep) / (windowMs / 60000),
 					MaxGapMs = gaps.Count > 0 ? gaps.Max() : double.NaN,
+					MaxGapAtSec = maxGapAt,
 					GapP99Ms = Pct(gaps, 99),
 					OwnLatencyP50 = Pct(m.OwnOrderLatency, 50),
 					OwnLatencyP95 = Pct(m.OwnOrderLatency, 95),
@@ -706,6 +749,70 @@ namespace NetHarness
 				LockstepDetail = detail,
 				Clients = summaries
 			};
+		}
+
+		/// <summary>Up to this many clients, every client keeps its packets for the replay check (see --record).</summary>
+		const int RecordAllUpTo = 16;
+
+		/// <summary>
+		/// The server's lines to one client, in order, with runs of the same line collapsed ("71x ...") and runs of the
+		/// same line about different clients ("p3 has stopped responding...", "p9 has stopped responding...")
+		/// collapsed with the names listed, so that a hundred-player game's notices do not bury the replies.
+		/// </summary>
+		static string DescribeMessages(IEnumerable<string> messages)
+		{
+			var parts = new List<string>();
+			string runText = null, runNames = null;
+			var runCount = 0;
+			var names = new List<string>();
+			void Flush()
+			{
+				if (runCount == 0)
+					return;
+
+				var text = runText.Replace("\n", "\\n");
+				if (runCount == 1)
+					parts.Add(runNames != null ? $"{runNames} {text}" : text);
+				else if (runNames != null)
+					parts.Add($"{runCount}x [{string.Join(" ", names)}] {text}");
+				else
+					parts.Add($"{runCount}x {text}");
+
+				runCount = 0;
+				names.Clear();
+			}
+
+			foreach (var m in messages)
+			{
+				// "p12 has stopped responding; ..." -> name "p12", text "has stopped responding; ..."
+				string name = null;
+				var text = m;
+				var space = m.IndexOf(' ');
+				if (space > 1 && space < 6 && (m[0] == 'p' || m[0] == 's') && m.Skip(1).Take(space - 1).All(char.IsDigit))
+				{
+					name = m[..space];
+					text = m[(space + 1)..];
+				}
+
+				if (runCount > 0 && text == runText && (name == null) == (runNames == null))
+				{
+					runCount++;
+					if (name != null)
+						names.Add(name);
+
+					continue;
+				}
+
+				Flush();
+				runText = text;
+				runNames = name;
+				runCount = 1;
+				if (name != null)
+					names.Add(name);
+			}
+
+			Flush();
+			return string.Join(" | ", parts);
 		}
 
 		static void PrintSummary(RunSummary r)

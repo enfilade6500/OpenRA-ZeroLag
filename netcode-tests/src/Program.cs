@@ -415,6 +415,10 @@ namespace NetHarness
 			// replies show with --messages 1. For checking what the server says about itself (Server.ReportServerSpeed).
 			var speedAt = new Queue<double>(opts.GetValueOrDefault("speedat", "").Split(',', StringSplitOptions.RemoveEmptyEntries)
 				.Select(x => double.Parse(x, CultureInfo.InvariantCulture)).OrderBy(x => x));
+
+			// --speedevery 30: the same, every 30 s of the measured window
+			var speedEvery = double.Parse(opts.GetValueOrDefault("speedevery", "0"), CultureInfo.InvariantCulture);
+			var nextSpeedEvery = speedEvery > 0 ? windowStart + speedEvery * 1000 : double.MaxValue;
 			while (Clock.Now < windowEnd && !clients.Any(c => c.Failed))
 			{
 				foreach (var (c, leaveAfter) in leavers)
@@ -424,6 +428,13 @@ namespace NetHarness
 				while (speedAt.Count > 0 && Clock.Now >= windowStart + speedAt.Peek() * 1000)
 				{
 					speedAt.Dequeue();
+					foreach (var c in clients.Take(2))
+						c.ChatToSend.Enqueue("!speed");
+				}
+
+				if (Clock.Now >= nextSpeedEvery)
+				{
+					nextSpeedEvery += speedEvery * 1000;
 					foreach (var c in clients.Take(2))
 						c.ChatToSend.Enqueue("!speed");
 				}
@@ -459,6 +470,20 @@ namespace NetHarness
 				c.Stop();
 
 			var extraChecks = new List<string>();
+
+			// --replay NAME: p1's view of the game as an OpenRA replay the real game can play, chat included
+			if (opts.TryGetValue("replay", out var replayPath))
+			{
+				try
+				{
+					var written = clients[0].WriteReplay(replayPath);
+					extraChecks.Add(written != null ? $"replay written: {written} (p1's view; needs the map installed to play)" : "replay not written: p1 never saw the lobby");
+				}
+				catch (Exception e)
+				{
+					extraChecks.Add($"replay not written: {e.GetType().Name}: {e.Message}");
+				}
+			}
 			foreach (var c in all)
 				if (c.RoleNote != null)
 					extraChecks.Add($"{c.Metrics.Name}: {c.RoleNote}");

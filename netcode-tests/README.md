@@ -127,7 +127,20 @@ ends up in another role than intended carries on in that role and says so in the
 `--spectators N` spectators, which cost the server what players cost; a map allows at most
 61 playable players (63 player references), spectators are not limited, so 60 players plus
 140 spectators is a 200-connection game a real client can still join. `--speedat 25,55`
-with `--messages 1` has p1 and p2 ask `!speed` at those seconds and prints the replies.
+with `--messages 1` has p1 and p2 ask `!speed` at those seconds and prints the replies;
+`--speedevery 30` asks every 30 s.
+
+`--replay NAME` writes p1's view of the game as `NAME.orarep`, the same bytes the release
+client's own recorder would have written minus the sync reports, so the real game can play
+it: the fake clients' orders have no subject actor and are ignored, so the map sits idle
+while the chat shows what the server said, the `!speed` replies and the server's own line
+included. Copy it to the game's `Replays/ra/release-20250330/` folder; the map must be
+installed on that machine. So the whole thing can run unattended:
+
+```sh
+dotnet out/NetHarness.dll --host example.org --port 1234 --scenario crewspec --players 60 --spectators 140 \
+  --speed fastest --duration 1200 --warmup 2 --speedevery 30 --messages 1 --replay stress200
+```
 
 ## Also in this directory
 

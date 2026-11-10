@@ -8,6 +8,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using OpenRA;
+using OpenRA.FileFormats;
 using OpenRA.Network;
 using OpenRA.Primitives;
 using OpenRA.Server;
@@ -152,6 +153,79 @@ namespace NetHarness
 		/// and the server's lobby lines can be exchanged and seen first.</summary>
 		public static long LobbyHoldMs;
 		double allReadyAt = -1;
+
+		string handshakeMod, handshakeVersion;
+		DateTime replayStartUtc = DateTime.UtcNow;
+
+		/// <summary>
+		/// Writes everything this client sent and received, as an OpenRA replay the real game can play (the same bytes
+		/// the release client's ReplayRecorder would have written), minus the sync reports, which are hashes of the
+		/// order stream here and would only make the real game report a desync. The server's chat lines to this client
+		/// (!speed replies included) are in it. The map must be installed on the machine that plays it.
+		/// </summary>
+		public string WriteReplay(string path)
+		{
+			if (LobbyInfo == null)
+				return null;
+
+			if (!path.EndsWith(".orarep", StringComparison.OrdinalIgnoreCase))
+				path += ".orarep";
+
+			var info = new GameInformation
+			{
+				Mod = handshakeMod ?? "ra",
+				Version = handshakeVersion ?? "",
+				MapUid = LobbyInfo.GlobalSettings.Map,
+				MapTitle = LobbyInfo.GlobalSettings.Map,
+				StartTimeUtc = replayStartUtc,
+				EndTimeUtc = DateTime.UtcNow,
+				FinalGameTick = Math.Max(0, netFrameNumber - 1) * Math.Max(1, netFrameInterval),
+			};
+
+			foreach (var c in LobbyInfo.Clients)
+			{
+				if (c.IsObserver)
+					continue;
+
+				info.Players.Add(new GameInformation.Player
+				{
+					ClientIndex = c.Index,
+					Name = c.Name,
+					IsHuman = c.Bot == null,
+					IsBot = c.Bot != null,
+					BotType = c.Bot,
+					FactionName = c.Faction,
+					FactionId = c.Faction,
+					DisplayFactionName = c.Faction,
+					DisplayFactionId = c.Faction,
+					Color = c.Color,
+					Team = c.Team,
+					SpawnPoint = c.SpawnPoint,
+					Handicap = c.Handicap,
+					IsRandomFaction = c.Faction == "Random",
+					IsRandomSpawnPoint = c.SpawnPoint == 0,
+					Fingerprint = c.Fingerprint,
+				});
+			}
+
+			using (var file = File.Create(path))
+			using (var writer = new BinaryWriter(file))
+			{
+				foreach (var (client, data) in Metrics.Recording)
+				{
+					if (OrderIO.TryParseSync(data, out _))
+						continue;
+
+					writer.Write(client);
+					writer.Write(data.Length);
+					writer.Write(data);
+				}
+
+				new ReplayMetadata(info).Write(writer);
+			}
+
+			return path;
+		}
 
 		/// <summary>--anyrole: a client that ends up in a different role than intended (a stranger took its slot) carries on
 		/// in that role instead of failing the run. On by default with --host.</summary>
@@ -694,8 +768,8 @@ namespace NetHarness
 								Team = 0,
 								State = Session.ClientState.Invalid
 							},
-							Mod = request.Mod,
-							Version = request.Version,
+							Mod = handshakeMod = request.Mod,
+							Version = handshakeVersion = request.Version,
 							Password = Password,
 							OrdersProtocol = ProtocolVersion.Orders
 						};

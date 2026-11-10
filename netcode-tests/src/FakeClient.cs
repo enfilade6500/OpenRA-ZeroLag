@@ -153,7 +153,8 @@ namespace NetHarness
 		public static long LobbyHoldMs;
 		double allReadyAt = -1;
 
-		/// <summary>--nosync: send no sync packets at all, like a client whose game never reports them.</summary>
+		/// <summary>--nosync: send no sync packets at all, like a client whose game never reports them, and do not compare
+		/// the ones received: for a game shared with real clients, whose hashes are of the real world.</summary>
 		public static bool NoSync;
 
 		/// <summary>--password: the server's password, for a real server that has one.</summary>
@@ -572,7 +573,11 @@ namespace NetHarness
 				}
 				else if (OrderIO.TryParseSync(p.Data, out var sync))
 				{
-					ReceiveSync(sync.Frame, sync.SyncHash);
+					// --nosync: a game shared with real clients, whose hashes are of the real world and can never match
+					// ours; theirs are recorded but not compared (the lockstep check among the fake clients is unaffected)
+					if (!NoSync)
+						ReceiveSync(sync.Frame, sync.SyncHash);
+
 					Metrics.Recording.Add((p.FromClient, p.Data));
 				}
 				else if (OrderIO.TryParseTickScale(p, out var scale))

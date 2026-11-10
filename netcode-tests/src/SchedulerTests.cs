@@ -1003,9 +1003,26 @@ static class Tests
 		Check(load.Summary() != null && load.Summary().Contains("not keeping up in 2 of 6"), "serverload: the summary counts the bad windows: " + load.Summary());
 	}
 
+	static void WaitForAStoppedPlayerIsNotTheHostsFault()
+	{
+		// The same 20s outage as above: the scheduler pauses 3s for P1 on purpose. That pause is the player's, and
+		// the server's own load measure must not book it as the host running late (test1 did, and told the log
+		// "The host is overloaded" after every such wait)
+		var (logs, s, _) = RunWithCapacities(new[] { 2.0, 3.0 }, 60000, 0, (t, cs, sched) =>
+		{
+			if (t == 10000)
+				cs[1].DownDeadUntil = cs[1].UpDeadUntil = t + 20000;
+		}, maxPlayerLag: 3000, onTick: (sched, t) => sched.Load.Update(t));
+
+		Check(logs.Any(l => l.Contains("Everyone waited") && l.Contains("continues without them")), "serverload: the bounded wait happened");
+		var summary = s.Load.Summary();
+		Check(summary != null && summary.Contains("kept up throughout"), "serverload: a deliberate wait for a stopped player is not the host's lateness: " + summary);
+	}
+
 	static int Main()
 	{
 		ServerLoadMeasuresLostTimeAndRateLimits();
+		WaitForAStoppedPlayerIsNotTheHostsFault();
 		FramesAreConsecutiveAndComplete();
 		AckCountsMatchPacketsSent();
 		SilentPlayerBlocksThenResumes();

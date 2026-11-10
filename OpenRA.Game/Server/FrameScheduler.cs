@@ -983,7 +983,10 @@ namespace OpenRA.Server
 
 			// Keep to the schedule, unless we have fallen more than a frame behind (e.g. after being blocked)
 			var period = FramePeriod;
-			Load.NoteClose(now, nextCloseTime, period);
+
+			// The pause for a stopped player above was deliberate: it is the player's, not the host's, and the
+			// first close after it is measured against now rather than against the schedule it suspended
+			Load.NoteClose(now, wasBlocked ? now : nextCloseTime, period);
 			nextCloseTime = now - nextCloseTime > period ? now + period : nextCloseTime + period;
 
 			return true;

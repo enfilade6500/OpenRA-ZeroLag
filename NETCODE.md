@@ -647,6 +647,25 @@ measured 85% speed, the server reported 87% in its log and to the admin, and 83.
 the game in its summary; untouched, it reports 100% and logs nothing, and costs nothing
 measurable.
 
+The first build (test1) had one false alarm: the scheduler's deliberate pause for a player
+who has stopped responding (up to `Server.MaxWaitForStalledPlayer`, 3 s) closes no frames,
+and the first close after it measured as that many milliseconds late. Four hours of the
+user's logs had seven "Server not keeping up" lines, every one right after "Game resumed
+after waiting 1.5s for X" or "Everyone waited 3.0s for X", and no real one. The pause is
+the player's, so the close after it is now measured against now rather than against the
+schedule it suspended; `WaitForAStoppedPlayerIsNotTheHostsFault` fails on test1 (max 3000 ms,
+"not keeping up in 1 of 6 windows") and passes on test2 ("kept up throughout").
+
+The same logs settled what a 100-client harness run from one PC (60 players, 40 spectators,
+fastest, 21 minutes) had shown: every client at 95.9% with the same 18.4 s gap. The server's
+side of it is "Everyone is waiting for p1, p3, ... (26 players)", a 3 s wait, "continues
+without them", twice more for the rest, then everyone 18.6 s behind catching up at turbo:
+all 100 clients went silent at once while the server kept closing frames. The server's
+summary for the game: 99.1% delivered, the three "bad" windows being the false alarm above.
+The stall was the harness process (every client kept every packet it received for the
+replay check, close to a million small objects a second at that size; the harness now
+records p1's only above 16 clients and watches its own machine for stalls).
+
 ## Testing
 
 `netcode-tests/` contains a harness of headless clients over simulated bad connections,

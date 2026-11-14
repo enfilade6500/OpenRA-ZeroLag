@@ -185,6 +185,23 @@ every instance's logs and replays for a look (the replays are the more useful ha
 sudo tar czf ~/openra-$(hostname)-$(date +%F).tgz -C /var/lib/openra --exclude='*/maps' .
 ```
 
+Replays are megabytes a game, nearly all of it unit orders. For looking back over weeks of
+games, `tools/replay-digest.py` (Python 3, standard library only) keeps what the logs do not
+have and drops the rest: map, players and teams, outcomes and when, game length, every chat
+line with its time into the game, the server's announcements, defeats, surrenders, pauses and
+departures, and each player's orders per minute. A 10 MB replay becomes 10 KB.
+
+```sh
+# every replay of the last two days, one JSON file each
+sudo python3 tools/replay-digest.py --since 48h -o ~/digests /var/lib/openra/*/Replays
+# one game, readable
+sudo python3 tools/replay-digest.py --text /var/lib/openra/1234/Replays/ra/release-20250330/ra-Server-2026-11-14T063102Z.orarep
+```
+
+A replay without its metadata footer is one the server did not finish writing (killed or died
+mid-game); the digest says so and reports everything up to the last packet. Players' IP
+addresses are left out unless `--ips` is given.
+
 ### Keeping the host from restarting the server under a game
 
 On Ubuntu, `unattended-upgrades` runs daily between 06:00 and 07:00 UTC, and `needrestart`

@@ -178,24 +178,27 @@ sudo install -m 644 OpenRA.Game.dll "$L/OpenRA.Game.dll.new" && sudo mv -f "$L/O
 sudo systemctl restart openra-ra@1234 openra-ra@1235 openra-ra@1236
 ```
 
-The state directories belong to the service user, so reading them takes `sudo`. To collect
-every instance's logs and replays for a look (the replays are the more useful half):
+The state directories belong to the service user, so reading them takes `sudo`. Two small
+tools in `tools/` collect what is worth looking at:
 
 ```sh
-sudo tar czf ~/openra-$(hostname)-$(date +%F).tgz -C /var/lib/openra --exclude='*/maps' .
+sudo install -m 755 tools/openra-grab        /usr/local/bin/openra-grab
+sudo install -m 755 tools/replay-digest.py   /usr/local/bin/openra-replay-digest
 ```
 
-Replays are megabytes a game, nearly all of it unit orders. For looking back over weeks of
-games, `tools/replay-digest.py` (Python 3, standard library only) keeps what the logs do not
-have and drops the rest: map, players and teams, outcomes and when, game length, every chat
-line with its time into the game, the server's announcements, defeats, surrenders, pauses and
-departures, and each player's orders per minute. A 10 MB replay becomes 10 KB.
+`openra-grab` writes one `.tgz` to your home directory with every instance's `Logs/` and, for
+the games, a digest of each replay (`openra-grab 6` for the past six hours, `openra-grab` for
+all of them, `-f` to include the `.orarep` files themselves). Replays are megabytes a game,
+nearly all of it unit orders; the digest keeps what the logs do not have and drops the rest:
+map, players and teams, outcomes and when, game length, every chat line with its time into the
+game, the server's announcements, defeats, surrenders, pauses and departures, and each player's
+orders per minute. A 10 MB replay becomes 10 KB, as `<instance>/Digests/<game>.json` and `.txt`.
+
+`openra-replay-digest` works on its own too (Python 3, standard library only):
 
 ```sh
-# every replay of the last two days, one JSON file each
-sudo python3 tools/replay-digest.py --since 48h -o ~/digests /var/lib/openra/*/Replays
-# one game, readable
-sudo python3 tools/replay-digest.py --text /var/lib/openra/1234/Replays/ra/release-20250330/ra-Server-2026-11-14T063102Z.orarep
+sudo openra-replay-digest --since 48h -o ~/digests /var/lib/openra/*/Replays   # one JSON per game
+sudo openra-replay-digest --text /var/lib/openra/1234/Replays/ra/release-20250330/ra-Server-2026-11-14T063102Z.orarep
 ```
 
 A replay without its metadata footer is one the server did not finish writing (killed or died

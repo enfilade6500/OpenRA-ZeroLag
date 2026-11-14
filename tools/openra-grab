@@ -108,7 +108,7 @@ mkdir -p "$OUT"
 if [ -n "$FULL" ] || [ ! -d "$WORK/out" ]; then
         tar czf "$OUT/$NAME" --null --no-recursion -T "$LIST"
 else
-        tar czf "$OUT/$NAME" --null --no-recursion -T "$LIST" --recursion -C "$WORK/out" .
+        tar czf "$OUT/$NAME" --null --no-recursion -T "$LIST" --recursion --transform 's|^\./||' -C "$WORK/out" .
 fi
 chown "$OWNER" "$OUT/$NAME"
 

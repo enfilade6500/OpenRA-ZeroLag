@@ -144,10 +144,11 @@ SERVER_NAME=My server (ZeroLag)
 EXTRA_ARGS=Server.VoteKickSlowest=True Server.AdvertiseOnline=True
 ```
 
-The stock server empties `dedicated-server.log` every time it starts, and with
-`Restart=always` it starts after every game. This override moves the previous run's logs
-aside first (note `%%` for `%` inside a unit file; `|| true` so a hiccup here never stops
-the server from starting):
+The stock server empties `dedicated-server.log` every time the process starts. (After a
+game, the launcher starts a fresh server inside the same process, so the log and the process
+carry on; the process itself only starts anew when it exits or is restarted, which is when
+`Restart=always` matters.) This override moves the previous run's logs aside first (note `%%`
+for `%` inside a unit file; `|| true` so a hiccup here never stops the server from starting):
 
 ```ini
 # /etc/systemd/system/openra-ra@.service.d/override.conf
@@ -183,6 +184,44 @@ every instance's logs and replays for a look (the replays are the more useful ha
 ```sh
 sudo tar czf ~/openra-$(hostname)-$(date +%F).tgz -C /var/lib/openra --exclude='*/maps' .
 ```
+
+### Keeping the host from restarting the server under a game
+
+On Ubuntu, `unattended-upgrades` runs daily between 06:00 and 07:00 UTC, and `needrestart`
+then restarts every service whose process is using a library that was just replaced. A .NET
+server uses libc, OpenSSL, ICU and the .NET runtime, all of which get security updates, so
+sooner or later every instance on the machine is restarted in the same second, with whatever
+games are on. The journal shows it plainly (`apt-daily-upgrade.service` starting, then a sweep
+of `Stopping ...` lines for unrelated services and the game units together). Tell needrestart
+to leave the game servers alone:
+
+```perl
+# /etc/needrestart/conf.d/50-openra.conf
+# Never restart the game servers behind players' backs; restart them by hand at a quiet time.
+$nrconf{override_rc}{qr(^openra-ra@)} = 0;
+```
+
+It is read on every run, nothing to reload. Updates then wait until you restart the units
+yourself (`needrestart` lists them as pending when you log in), because the launcher's
+between-games restart stays inside the old process and picks nothing up. Two companions:
+`grep Automatic-Reboot /etc/apt/apt.conf.d/50unattended-upgrades` should be `"false"`, or a
+kernel update reboots the box under the players instead; and if you would rather the upgrades
+ran at a dead hour anyway, `sudo systemctl edit apt-daily-upgrade.timer` with
+
+```ini
+[Timer]
+OnCalendar=
+OnCalendar=*-*-* 10:00
+RandomizedDelaySec=30m
+```
+
+moves them (10:00 UTC is 2–3 am on the US west coast; pick your own quiet hour).
+
+Two more things the launcher does not do for you. It only starts a fresh server when a
+started game has no connections left, so a single spectator who stays after everyone else
+has gone keeps a finished game "running" indefinitely, and a process that dies or hangs mid-game
+is not restarted by it; `Restart=always` in the unit covers a death, nothing covers a hang
+short of someone noticing the server has vanished from the list.
 
 ## Reading the log
 

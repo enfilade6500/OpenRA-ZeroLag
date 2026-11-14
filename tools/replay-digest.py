@@ -663,6 +663,7 @@ def main(argv):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[1], formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("paths", nargs="+", help=".orarep files, or directories to search recursively")
     ap.add_argument("--text", action="store_true", help="readable text instead of JSON")
+    ap.add_argument("--both", action="store_true", help="with -o: write both <name>.json and <name>.txt")
     ap.add_argument("--since", type=parse_since, default=None, help="only replays modified within this long (48h, 7d, 90m)")
     ap.add_argument("-o", "--out-dir", default=None, help="write one file per replay here (<name>.json or .txt) instead of stdout")
     ap.add_argument("--ips", action="store_true", help="include the players' IP addresses and locations")
@@ -697,9 +698,13 @@ def main(argv):
             continue
         text = render_text(d) if args.text else json.dumps(d, ensure_ascii=False)
         if args.out_dir:
-            name = os.path.splitext(os.path.basename(f))[0] + (".txt" if args.text else ".json")
-            with open(os.path.join(args.out_dir, name), "w", encoding="utf-8") as w:
-                w.write(text + "\n")
+            base = os.path.splitext(os.path.basename(f))[0]
+            outputs = [(".txt", render_text(d)), (".json", json.dumps(d, ensure_ascii=False))] if args.both \
+                else [((".txt" if args.text else ".json"), text)]
+            for ext, body in outputs:
+                with open(os.path.join(args.out_dir, base + ext), "w", encoding="utf-8") as w:
+                    w.write(body + "\n")
+            name = base + ("" if args.both else outputs[0][0])
             if not args.quiet:
                 print(f"{f} -> {name} ({len(d['chat'])} chat lines, {d['game']['last_frame']} frames)", file=sys.stderr)
         else:

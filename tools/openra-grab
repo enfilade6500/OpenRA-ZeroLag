@@ -1,0 +1,117 @@
+#!/bin/sh
+# openra-grab: one .tgz with every instance's Logs/ (all of it) and, for the replays, either
+# a digest of each game (default) or the .orarep files themselves (-f).
+#
+#   openra-grab              all logs, a digest of every replay
+#   openra-grab 6            all logs, digests of the replays from the past 6 hours
+#   openra-grab -f 6         ...the replays themselves instead of digests
+#   openra-grab -o /tmp 24   written to /tmp
+#
+# Options:
+#   -b BASEDIR   where the instance directories are (default /var/lib/openra)
+#   -o OUTDIR    where to write the archive (default: your home directory)
+#   -f           full: include the .orarep files (megabytes a game) instead of digests
+#
+# Digests are made by openra-replay-digest (tools/replay-digest.py from the ZeroLag repository,
+# installed next to this script); without it, -f is assumed. A digest is a few KB per game:
+# map, players, outcomes, length, chat, the server's announcements, defeats and departures.
+# They land in the archive as <instance>/Digests/<game>.json and .txt.
+#
+# The state directories belong to the service user, so this re-runs itself with sudo when
+# needed and hands the archive back to you afterwards.
+set -eu
+
+if [ "$(id -u)" -ne 0 ]; then
+        exec sudo -- "$0" "$@"
+fi
+
+BASE=/var/lib/openra
+OWNER=${SUDO_USER:-root}
+OUT=$(getent passwd "$OWNER" | cut -d: -f6)
+HOURS=
+FULL=
+DIGEST=${OPENRA_REPLAY_DIGEST:-$(command -v openra-replay-digest || true)}
+
+usage() {
+        echo "usage: openra-grab [-b BASEDIR] [-o OUTDIR] [-f] [HOURS]" >&2
+        exit 2
+}
+
+while getopts "b:o:f" opt; do
+        case $opt in
+                b) BASE=$OPTARG ;;
+                o) OUT=$OPTARG ;;
+                f) FULL=1 ;;
+                *) usage ;;
+        esac
+done
+shift $((OPTIND - 1))
+[ $# -le 1 ] || usage
+if [ $# -eq 1 ]; then
+        case $1 in '' | *[!0-9]*) usage ;; esac
+        HOURS=$1
+fi
+
+if [ -z "$FULL" ] && [ -z "$DIGEST" ]; then
+        echo "openra-grab: openra-replay-digest not found; including the replays themselves" >&2
+        FULL=1
+fi
+
+cd "$BASE" 2>/dev/null || {
+        echo "openra-grab: $BASE does not exist (use -b to point at the instance directories)" >&2
+        exit 1
+}
+
+LIST=$(mktemp)
+WORK=$(mktemp -d)
+trap 'rm -rf "$LIST" "$WORK"' EXIT
+
+instances=0
+replays=0
+for d in */; do
+        d=${d%/}
+        [ -d "$d/Logs" ] || [ -d "$d/Replays" ] || continue
+        instances=$((instances + 1))
+        if [ -d "$d/Logs" ]; then
+                find "$d/Logs" -print0 >>"$LIST"
+        fi
+        [ -d "$d/Replays" ] || continue
+
+        # The replays in the window, as a NUL-separated list
+        RLIST=$WORK/replays-$d
+        if [ -n "$HOURS" ]; then
+                find "$d/Replays" -type f -name '*.orarep' -mmin "-$((HOURS * 60))" -print0 >"$RLIST"
+        else
+                find "$d/Replays" -type f -name '*.orarep' -print0 >"$RLIST"
+        fi
+        n=$(tr -cd '\0' <"$RLIST" | wc -c)
+        replays=$((replays + n))
+        [ "$n" -gt 0 ] || continue
+
+        if [ -n "$FULL" ]; then
+                cat "$RLIST" >>"$LIST"
+        else
+                mkdir -p "$WORK/out/$d/Digests"
+                # one JSON and one text file per game; a replay the tool cannot read is reported, not fatal
+                xargs -0 "$DIGEST" --both --quiet -o "$WORK/out/$d/Digests" <"$RLIST" || true
+        fi
+done
+
+if [ "$instances" -eq 0 ]; then
+        echo "openra-grab: no instance directories (*/Logs or */Replays) under $BASE" >&2
+        echo "openra-grab: use -b to point at the right place" >&2
+        exit 1
+fi
+
+NAME=openra-$(hostname -s)-$(date -u +%Y%m%d-%H%MZ)${HOURS:+-last${HOURS}h}${FULL:+-full}.tgz
+mkdir -p "$OUT"
+if [ -n "$FULL" ] || [ ! -d "$WORK/out" ]; then
+        tar czf "$OUT/$NAME" --null --no-recursion -T "$LIST"
+else
+        tar czf "$OUT/$NAME" --null --no-recursion -T "$LIST" --recursion -C "$WORK/out" .
+fi
+chown "$OWNER" "$OUT/$NAME"
+
+what="replay(s) included"
+[ -z "$FULL" ] && what="replay(s) digested"
+echo "$OUT/$NAME: $instances instance(s), $replays $what, $(du -h "$OUT/$NAME" | cut -f1)"

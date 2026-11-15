@@ -6,8 +6,10 @@ A dedicated server records every game as Replays/<mod>/<version>/<mod>-Server-<t
 order packet it relayed, plus (if the game ended normally) a metadata footer. Those files are
 megabytes each and most of their bulk is unit orders. For reviewing how a server has been doing
 over weeks, what is wanted is the rest: who played what map for how long, what they said in chat,
-what the server announced, who was defeated or left and when. This script pulls that out as JSON
-(or readable text) so that the replays themselves can stay on the server.
+what the server announced, who was defeated or left and when, and whether the game went out of
+sync (every client's world hash is in the file, so the digest names the client that diverged).
+This script pulls that out as JSON (or readable text) so that the replays themselves can stay on
+the server. A client's own replay (Replays/<mod>/<version>/<mod>-<time>.orarep) reads the same way.
 
     replay-digest.py GAME.orarep [...]            one JSON object per replay, on stdout
     replay-digest.py --text GAME.orarep           readable
@@ -320,8 +322,12 @@ def digest(path, include_ips=False, chat_limit=None):
             out["map"]["title"] = meta.get("MapTitle")
             out["start_utc"] = iso_utc(meta.get("StartTimeUtc"))
             out["end_utc"] = iso_utc(meta.get("EndTimeUtc"))
+            # A client's replay carries the world tick its game stopped at; a server's leaves it 0. It counts
+            # world ticks (NetFrameInterval of them per net frame), so it is kept apart from the frame count
             try:
-                out["game"]["last_frame"] = int(meta.get("FinalGameTick", "0"))
+                tick = int(meta.get("FinalGameTick", "0"))
+                if tick > 0:
+                    out["game"]["final_world_tick"] = tick
             except ValueError:
                 pass
         for n in root.children:
@@ -397,6 +403,7 @@ def digest(path, include_ips=False, chat_limit=None):
     last_defeat = 0
     defeat_frames = {}        # world player index -> frame first seen defeated
     last_sync_frame = -1
+    sync_by_frame = {}        # frame -> {client: (hash, defeat)}; every client's hash is recorded, by server and client alike
     handshake_names = {}
     fluent_re = re.compile(r"^\s*(\S+?)\s*:\s*(.*)$")
 
@@ -427,6 +434,8 @@ def digest(path, include_ips=False, chat_limit=None):
                     o = parse_order(r)
                     kind = o["type"]
                     if kind == "sync":
+                        if o["hash"] != 0:
+                            sync_by_frame.setdefault(frame, {})[client] = (o["hash"], o["defeat"])
                         if frame > last_sync_frame:
                             last_sync_frame = frame
                             d = o["defeat"]
@@ -524,6 +533,27 @@ def digest(path, include_ips=False, chat_limit=None):
     if current_frame > out["game"]["last_frame"]:
         out["game"]["last_frame"] = current_frame
     out["game"]["duration_s"] = round(out["game"]["last_frame"] * (frame_ms or 120) / 1000.0, 1)
+
+    # Desync: the first frame where the clients' recorded world hashes (or defeat masks) disagree. The clients in
+    # the minority are the ones that diverged; with two clients nobody can say which.
+    for f in sorted(sync_by_frame):
+        row = sync_by_frame[f]
+        if len(row) < 2 or len(set(row.values())) < 2:
+            continue
+        counts = {}
+        for v in row.values():
+            counts[v] = counts.get(v, 0) + 1
+        majority = max(counts.values())
+        odd = sorted(c for c, v in row.items() if counts[v] < majority)
+        out["game"]["out_of_sync"] = True
+        out["game"]["desync"] = {
+            "frame": f, "t": t_of(f), "clients": len(row),
+            "odd": [name_of(c) for c in odd] if odd else [name_of(c) for c in sorted(row)],
+            "undecided": not odd,
+        }
+        add_event(f, "desync", ", ".join(out["game"]["desync"]["odd"]) + ("" if odd else " (two-way, no majority)"))
+        break
+    out["events"].sort(key=lambda e: e["frame"])
     if out["start_utc"] is None and file_time is not None:
         out["start_utc"] = file_time.strftime("%Y-%m-%dT%H:%M:%SZ")
         out["start_utc_source"] = "file name"
@@ -603,6 +633,13 @@ def render_text(d):
     lines.append("  speed: %s (%s ms/frame)   frames: %d = %s%s" % (
         g["speed"] or "?", g["frame_ms"] or "?", g["last_frame"], mmss(g["duration_s"] or 0),
         "" if g["started"] else "   (game never started)"))
+    if g.get("desync"):
+        ds = g["desync"]
+        if ds.get("undecided"):
+            lines.append("  OUT OF SYNC at %s (frame %d): %s disagree, no majority" % (ds["t"], ds["frame"], " and ".join(ds["odd"])))
+        else:
+            lines.append("  OUT OF SYNC at %s (frame %d): %s diverged from the other %d" % (
+                ds["t"], ds["frame"], ", ".join(ds["odd"]), ds["clients"] - len(ds["odd"])))
     players = [p for p in d["players"] if not p["observer"]]
     specs = [p for p in d["players"] if p["observer"]]
     lines.append("  players: %d, spectators: %d" % (len(players), len(specs)))

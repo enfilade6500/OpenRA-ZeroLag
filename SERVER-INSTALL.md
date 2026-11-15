@@ -191,8 +191,10 @@ the games, a digest of each replay (`openra-grab 6` for the past six hours, `ope
 all of them, `-f` to include the `.orarep` files themselves). Replays are megabytes a game,
 nearly all of it unit orders; the digest keeps what the logs do not have and drops the rest:
 map, players and teams, outcomes and when, game length, every chat line with its time into the
-game, the server's announcements, defeats, surrenders, pauses and departures, and each player's
-orders per minute. A 10 MB replay becomes 10 KB, as `<instance>/Digests/<game>.json` and `.txt`.
+game, the server's announcements, defeats, surrenders, pauses and departures, each player's
+orders per minute, and whether the game went out of sync and which client diverged (every
+client's world hash is in the replay). A 10 MB replay becomes 10 KB, as
+`<instance>/Digests/<game>.json` and `.txt`.
 
 `openra-replay-digest` works on its own too (Python 3, standard library only):
 

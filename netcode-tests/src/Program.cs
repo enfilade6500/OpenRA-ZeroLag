@@ -22,6 +22,9 @@ namespace NetHarness
 		/// <summary>Joins the lobby but never readies up, so the server kicks it at game start.</summary>
 		public bool NeverReady;
 
+		/// <summary>Sends one frame-stamped order packet from the lobby (a crafted client); must be dropped at once.</summary>
+		public bool RogueInLobby;
+
 		/// <summary>Joins as a spectator (no slot).</summary>
 		public bool Spectator;
 
@@ -91,6 +94,14 @@ namespace NetHarness
 				var lurker = Good("lurker");
 				lurker.NeverReady = true;
 				return new() { Good("p1"), Good("p2"), Good("p3"), p4, lurker };
+			}),
+
+			["rogue"] = ("a 5th client sends a frame-stamped order packet from the lobby, which crashes every release client that receives one; the server must drop it before the game starts and relay nothing", () =>
+			{
+				var rogue = Good("rogue");
+				rogue.RogueInLobby = true;
+				rogue.NeverReady = true;
+				return new() { Good("p1"), Good("p2"), Good("p3"), Good("p4"), rogue };
 			}),
 
 			["chaos"] = ("every player has a different problem: slow link, lossy link, CPU hitches, 600 APM", () =>
@@ -349,7 +360,7 @@ namespace NetHarness
 				var s = specs[i];
 				var proxy = new DelayProxy(server, s.Up, s.Down, seed * 100 + i);
 				proxies.Add(proxy);
-				var c = new FakeClient(s.Name, s.Cpu, seed * 1000 + i, specs.Count(x => !x.NeverReady), ordersPerSecond) { NeverReady = s.NeverReady, ExpectedTotalClients = specs.Count, Spectator = s.Spectator, ExpectKick = s.ExpectKick };
+				var c = new FakeClient(s.Name, s.Cpu, seed * 1000 + i, specs.Count(x => !x.NeverReady), ordersPerSecond) { NeverReady = s.NeverReady, RogueLobbyPacket = s.RogueInLobby, ExpectedTotalClients = specs.Count, Spectator = s.Spectator, ExpectKick = s.ExpectKick };
 				c.Recording = record == "all" || (record == "first" && i == 0);
 				c.Metrics.Link = $"up {s.Up} / down {s.Down}";
 				clients.Add(c);

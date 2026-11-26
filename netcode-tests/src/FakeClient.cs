@@ -109,6 +109,14 @@ namespace NetHarness
 		/// <summary>Never reports ready, so the server kicks it when the game starts (tests the kick/flush path).</summary>
 		public bool NeverReady;
 
+		/// <summary>
+		/// A crafted client: once in the lobby, sends one order packet stamped for a frame, as only a started game's
+		/// clients do. The release client crashes on receiving one in a lobby, so the server must drop the sender and
+		/// relay nothing; every other fake client fails the run if the packet reaches it.
+		/// </summary>
+		public bool RogueLobbyPacket;
+		bool rogueSent;
+
 		/// <summary>Crash test: never report "NotReady" and let the admin start anyway.</summary>
 		public static bool SkipReady;
 
@@ -851,6 +859,14 @@ namespace NetHarness
 			var me = LobbyInfo.Clients.FirstOrDefault(c => c.Index == clientId);
 			if (me == null)
 				return;
+
+			if (RogueLobbyPacket && !rogueSent)
+			{
+				rogueSent = true;
+				Console.WriteLine($"[debug] {name} sends an order packet stamped for frame 1 while in the lobby at {Clock.Now:F0}");
+				Send(new OrderPacket(new[] { Order.Chat("boo") }).Serialize(1));
+				return;
+			}
 
 			// Become a spectator before readying up
 			if (Spectator && !spectateSent && !me.IsObserver)

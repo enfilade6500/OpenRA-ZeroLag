@@ -666,6 +666,26 @@ The stall was the harness process (every client kept every packet it received fo
 replay check, close to a million small objects a second at that size; the harness now
 records p1's only above 16 clients and watches its own machine for stalls).
 
+### The lobby crash
+
+A release client keeps one order queue per client, created when the game starts. In the
+lobby there are none, and `OrderManager.ReceiveOrders` throws `InvalidDataException`
+("Received packet from disconnected client") when a frame-stamped order packet arrives from
+a client it has no queue for. The release server relays frame-stamped packets to everyone
+without looking at the game state, and so did this one before a game starts (the scheduler
+exists only from the start of a game, and before that the stock path runs). One packet
+stamped for any frame, sent from a lobby, therefore crashes every client in it, with the
+sender's client index in their exception logs. Legitimate clients never send one before the
+start; a crafted client did the rounds of public servers in late November 2026, and the
+server logs of two days show the mark it leaves: joins at twice the normal rate and one join
+in six a rejoin of the same name within two minutes (one in twenty on other days), in waves.
+
+From test3 the server refuses frame-stamped packets while `State != GameStarted`: the sender
+gets the kick message, its address goes on the temporary ban list, the connection is dropped,
+and nothing is relayed. The harness scenario `rogue` sends such a packet from a fifth client
+once it is in the lobby; against test2 the other four die within two seconds with the exact
+exception above, against test3 the rogue is dropped and they play on in lockstep.
+
 ## Testing
 
 `netcode-tests/` contains a harness of headless clients over simulated bad connections,

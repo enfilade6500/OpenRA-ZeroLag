@@ -44,6 +44,7 @@ Wi-Fi hiccup, looks like to the game). Byte order is always preserved, like TCP.
 | slowcpu | p4's PC needs 44ms per 40ms tick (~90% speed at best) |
 | chaos | every player has a different problem, 600 APM |
 | leave | p4 quits mid-game; a 5th client never readies and is kicked at start |
+| rogue | a 5th client sends a frame-stamped order packet from the lobby (the release client crashes on receiving one); the server must drop it and relay nothing |
 | holetrain, decline, lossload, outage8, deadlink, plateau, floorreturn | patterns measured in real games (see NETCODE.md, v1.1) |
 | melo | the 14-player game from v1.1's first day: p4's PC fine, then ~60% for two minutes, then ~85%, then fine (run 420s) |
 | wander | a PC whose ceiling wanders between ~66% and ~92% for eight minutes (run 480s) |

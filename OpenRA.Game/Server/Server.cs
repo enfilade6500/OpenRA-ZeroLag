@@ -967,6 +967,22 @@ namespace OpenRA.Server
 
 			if (frame == 0)
 				InterpretServerOrders(conn, data);
+			else if (State != ServerState.GameStarted)
+			{
+				// Clients send frame-stamped orders only once the game has started: before that, every client that
+				// receives one has no queue for its sender, and the release client treats that as fatal
+				// ("Received packet from disconnected client"). The release server relays such a packet to the whole
+				// lobby regardless, so one crafted packet on join crashes everyone in it. Nothing legitimate sends
+				// one here, so the sender is dropped and kept out for a while, and the packet goes no further.
+				var client = GetClient(conn);
+				Log.Write("server", $"Dropping {client?.Name ?? "client " + conn.PlayerIndex} ({conn.EndPoint}): " +
+					$"sent {data.Length} bytes of orders stamped for frame {frame} before the game started, which would crash every other client.");
+				SendOrderTo(conn, "ServerError", YouWereKicked);
+				if (client != null && !TempBans.Contains(client.IPAddress))
+					TempBans.Add(client.IPAddress);
+
+				DropClient(conn);
+			}
 			else
 			{
 				// Non-immediate orders must be projected into the future so that all players can

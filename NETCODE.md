@@ -686,6 +686,12 @@ and nothing is relayed. The harness scenario `rogue` sends such a packet from a 
 once it is in the lobby; against test2 the other four die within two seconds with the exact
 exception above, against test3 the rogue is dropped and they play on in lockstep.
 
+The first evening of test3 on two instances showed the client that does this in practice: it
+never completes a handshake — it connects, fires its 111-byte packet at once, and reconnects
+four seconds later, 1,166 times in three and a half hours. The ban list only applied to
+clients with a handshake, so from test4 the address is banned whether or not one happened,
+and a banned address is turned away in `AcceptConnection`, before any packet is read from it.
+
 ## Testing
 
 `netcode-tests/` contains a harness of headless clients over simulated bad connections,

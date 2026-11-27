@@ -497,6 +497,16 @@ namespace OpenRA.Server
 			if (State != ServerState.WaitingPlayers)
 				return;
 
+			// An address on the temporary ban list is turned away here, before a single packet is read from it. The
+			// handshake check below only sees clients that complete a handshake, and the client that crashes lobbies
+			// (see ReceiveOrders) does not bother to: it reconnects every few seconds and fires its packet at once.
+			if (socket.RemoteEndPoint is IPEndPoint remote && TempBans.Contains(remote.Address.ToString()))
+			{
+				Log.Write("server", $"Rejected connection from {remote}; temporarily banned.");
+				try { socket.Close(); } catch { }
+				return;
+			}
+
 			// Validate player identity by asking them to sign a random blob of data
 			// which we can then verify against the player public key database
 			var token = Convert.ToBase64String(OpenRA.Exts.MakeArray(256, _ => (byte)Random.Next()));
@@ -991,8 +1001,11 @@ namespace OpenRA.Server
 				Log.Write("server", $"Dropping {client?.Name ?? "client " + conn.PlayerIndex} ({conn.EndPoint}): " +
 					$"sent {data.Length} bytes of orders stamped for frame {frame} before the game started, which would crash every other client.");
 				SendOrderTo(conn, "ServerError", YouWereKicked);
-				if (client != null && !TempBans.Contains(client.IPAddress))
-					TempBans.Add(client.IPAddress);
+
+				// Ban the address, whether or not the connection ever completed a handshake
+				var address = client?.IPAddress ?? (conn.EndPoint as IPEndPoint)?.Address.ToString();
+				if (address != null && !TempBans.Contains(address))
+					TempBans.Add(address);
 
 				DropClient(conn);
 			}

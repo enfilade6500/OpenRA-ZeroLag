@@ -259,6 +259,12 @@ namespace NetHarness
 		/// the ones received: for a game shared with real clients, whose hashes are of the real world.</summary>
 		public static bool NoSync;
 
+		/// <summary>From this net frame on, this client reports a wrong world hash: a game that has diverged from the others'.</summary>
+		public int WrongHashFromFrame = int.MaxValue;
+
+		/// <summary>The scenario expects a desync (a WrongHashFromFrame client), so disagreeing hashes are counted, not fatal.</summary>
+		public static bool ExpectDesync;
+
 		/// <summary>--password: the server's password, for a real server that has one.</summary>
 		public static string Password = "";
 
@@ -578,8 +584,9 @@ namespace NetHarness
 			var hash = (int)orderStreamHash;
 			Metrics.SyncHashes[netFrameNumber] = hash;
 			var defeatState = DefeatBit >= 0 && netFrameNumber >= DefeatAtFrame ? 1UL << DefeatBit : 0UL;
+			var reportedHash = netFrameNumber >= WrongHashFromFrame ? hash ^ 0x5A5A5A5A : hash;
 			if (!NoSync)
-				queuedSyncPackets.Enqueue(OrderIO.SerializeSync((netFrameNumber, hash, defeatState)));
+				queuedSyncPackets.Enqueue(OrderIO.SerializeSync((netFrameNumber, reportedHash, defeatState)));
 
 			ReceiveSync(netFrameNumber, hash);
 			Record((clientId, OrderIO.SerializeSync((netFrameNumber, hash, defeatState))));
@@ -630,7 +637,8 @@ namespace NetHarness
 				if (existing != hash)
 				{
 					Metrics.Desyncs++;
-					Fail($"desync at frame {frame}");
+					if (!ExpectDesync)
+						Fail($"desync at frame {frame}");
 				}
 			}
 			else

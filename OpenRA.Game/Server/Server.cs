@@ -210,6 +210,10 @@ namespace OpenRA.Server
 
 		public void EndGame()
 		{
+			// A desync whose other reports never came (the game ended first) is still worth naming with what arrived
+			if (outOfSyncFrame >= 0)
+				ReportOutOfSync("game ended");
+
 			foreach (var t in serverTraits.WithInterface<IEndGame>())
 				t.GameEnded(this);
 
@@ -881,45 +885,113 @@ namespace OpenRA.Server
 			}
 		}
 
-		void OutOfSync(int frame)
+		// The first frame whose sync hashes disagreed, or -1 while the game is in sync. The stock server stops here: it logs
+		// a line for this frame and every frame after it, and destroys the replay. The replay is the one thing that can show
+		// what diverged, so ZeroLag keeps recording, says once which client's game differs from the others', and stays quiet
+		// about the frames that follow (everything disagrees from here on).
+		int outOfSyncFrame = -1;
+		bool outOfSyncReported;
+
+		/// <summary>Every sync packet received for outOfSyncFrame, in arrival order: who reported which hash.</summary>
+		readonly List<(int Client, byte[] Packet)> outOfSyncPackets = new();
+
+		/// <summary>
+		/// A hash for the bad frame can arrive well after the first disagreement (a client several frames behind), so the
+		/// report waits until every client has reported that frame, or until a client is this many frames past it.
+		/// </summary>
+		const int OutOfSyncReportDelayFrames = 50;
+
+		void OutOfSync(int frame, int firstClient, byte[] firstPacket, int secondClient, byte[] secondPacket)
 		{
-			Log.Write("server", $"Out of sync detected at frame {frame}, cancel replay recording");
-
-			// Make sure the written file is not valid
-			// TODO: storing a serverside replay on desync would be extremely useful
-			if (recorder != null)
-			{
-				recorder.Metadata = null;
-
-				recorder.Dispose();
-			}
-
-			// Stop the recording
-			recorder = null;
+			outOfSyncFrame = frame;
+			outOfSyncPackets.Add((firstClient, firstPacket));
+			outOfSyncPackets.Add((secondClient, secondPacket));
+			Log.Write("server", $"Out of sync at frame {frame}: {ClientName(firstClient)} reported hash {SyncHashText(firstPacket)}, " +
+				$"{ClientName(secondClient)} reported {SyncHashText(secondPacket)}. The replay keeps recording.");
+			ReportOutOfSyncIfComplete();
 		}
 
-		readonly Dictionary<int, byte[]> syncForFrame = new();
+		void ReportOutOfSyncIfComplete()
+		{
+			if (!outOfSyncReported && outOfSyncPackets.Select(p => p.Client).Distinct().Count() >= Conns.Count(c => c.Validated))
+				ReportOutOfSync("all clients reported");
+		}
+
+		string ClientName(int client) => LobbyInfo.ClientWithIndex(client)?.Name ?? $"client {client}";
+
+		static string SyncHashText(byte[] packet)
+		{
+			// [0] order type, [1..4] world hash, [5..12] defeat state (see OrderIO.SerializeSync)
+			var text = BitConverter.ToInt32(packet, 1).ToString("X8", NumberFormatInfo.InvariantInfo);
+			var defeat = BitConverter.ToUInt64(packet, 1 + 4);
+			return defeat == 0 ? text : $"{text} (defeat state {defeat:X})";
+		}
+
+		/// <summary>
+		/// Names the odd one out for the first disagreeing frame, in the log and to the players. With three or more reports
+		/// the hash most clients agree on is taken as the game, and the others as having diverged from it; with two, nobody
+		/// can say which is right, so both are named.
+		/// </summary>
+		void ReportOutOfSync(string reason)
+		{
+			if (outOfSyncReported)
+				return;
+
+			outOfSyncReported = true;
+			var groups = outOfSyncPackets
+				.GroupBy(p => SyncHashText(p.Packet))
+				.Select(g => (Hash: g.Key, Clients: g.Select(p => p.Client).Distinct().OrderBy(c => c).ToList()))
+				.OrderByDescending(g => g.Clients.Count)
+				.ToList();
+
+			Log.Write("server", $"Out of sync at frame {outOfSyncFrame} ({reason}): " +
+				groups.Select(g => $"hash {g.Hash} from {g.Clients.Select(ClientName).JoinWith(", ")}").JoinWith("; ") + ".");
+
+			string message;
+			if (groups.Count >= 2 && groups[0].Clients.Count > groups[1].Clients.Count)
+			{
+				// A clear majority: the rest diverged from it
+				var odd = groups.Skip(1).SelectMany(g => g.Clients).Select(ClientName).ToList();
+				message = odd.Count == 1
+					? $"Out of sync at frame {outOfSyncFrame}: {odd[0]}'s game differs from the other {groups[0].Clients.Count}."
+					: $"Out of sync at frame {outOfSyncFrame}: the games of {odd.JoinWith(", ")} differ from the other {groups[0].Clients.Count}.";
+			}
+			else
+			{
+				// Two clients, or a tie: nobody can say whose game is right
+				var sides = groups.Select(g => g.Clients.Select(ClientName).ToList()).ToList();
+				message = sides.All(side => side.Count == 1)
+					? $"Out of sync at frame {outOfSyncFrame}: {sides.Select(side => side[0] + "'s").JoinWith(" and ")} games disagree."
+					: $"Out of sync at frame {outOfSyncFrame}: the games of {sides.Select(side => side.JoinWith(" and ")).JoinWith(" disagree with those of ")}.";
+			}
+
+			SendMessage(message);
+		}
+
+		readonly Dictionary<int, (int Client, byte[] Packet)> syncForFrame = new();
 		int lastDefeatStateFrame;
 		ulong lastDefeatState;
 
-		void HandleSyncOrder(int frame, byte[] packet)
+		void HandleSyncOrder(int frame, byte[] packet, int from)
 		{
+			if (outOfSyncFrame >= 0)
+			{
+				// Already out of sync: only the first bad frame is still of interest, to name who diverged
+				if (frame == outOfSyncFrame)
+				{
+					outOfSyncPackets.Add((from, packet));
+					ReportOutOfSyncIfComplete();
+				}
+				else if (frame >= outOfSyncFrame + OutOfSyncReportDelayFrames && !outOfSyncReported)
+					ReportOutOfSync(outOfSyncPackets.Select(p => p.Client).Distinct().Count() + " of " + Conns.Count(c => c.Validated) + " clients reported");
+
+				return;
+			}
+
 			if (syncForFrame.TryGetValue(frame, out var existingSync))
 			{
-				if (packet.Length != existingSync.Length)
-				{
-					OutOfSync(frame);
-					return;
-				}
-
-				for (var i = 0; i < packet.Length; i++)
-				{
-					if (packet[i] != existingSync[i])
-					{
-						OutOfSync(frame);
-						return;
-					}
-				}
+				if (!existingSync.Packet.AsSpan().SequenceEqual(packet))
+					OutOfSync(frame, existingSync.Client, existingSync.Packet, from, packet);
 			}
 			else
 			{
@@ -938,7 +1010,7 @@ namespace OpenRA.Server
 					lastDefeatStateFrame = frame;
 				}
 
-				syncForFrame.Add(frame, packet);
+				syncForFrame.Add(frame, (from, packet));
 			}
 		}
 
@@ -960,7 +1032,7 @@ namespace OpenRA.Server
 			if (data.Length > 0 && data[0] == (byte)OrderType.SyncHash)
 			{
 				if (data.Length == Order.SyncHashOrderLength)
-					HandleSyncOrder(frame, data);
+					HandleSyncOrder(frame, data, from);
 				else
 					Log.Write("server", $"Dropped sync order with length {data.Length} from client {from}. Expected length {Order.SyncHashOrderLength}.");
 			}

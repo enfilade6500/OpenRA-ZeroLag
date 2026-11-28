@@ -692,6 +692,33 @@ four seconds later, 1,166 times in three and a half hours. The ban list only app
 clients with a handshake, so from test4 the address is banned whether or not one happened,
 and a banned address is turned away in `AcceptConnection`, before any packet is read from it.
 
+### Desyncs: keep the replay, name the client
+
+Every client sends the server a hash of its world every net frame, and the server compares
+each frame's hashes as they arrive. When two disagree the release server logs "Out of sync
+detected at frame N, cancel replay recording", destroys the replay (it nulls the metadata and
+closes the file), and then logs the same line again for every frame after it, hundreds of
+lines for one event. Its own comment calls a server-side replay of a desynced game "extremely
+useful"; it is the only record of what diverged. A month of this server's logs (3,160 games,
+34 out of sync, about one in a hundred) could say when a game went out of sync and nothing
+else: not which client, and no replay to find out from. The digests in `openra-grab` showed
+zero desyncs for the same month, because the replays they read had all been destroyed.
+
+From test5 the server keeps recording. The first disagreement is logged once, with the two
+hashes and who sent them, and the hashes for that frame go on being collected: once every
+client has reported it, or a client is 50 frames past it, or the game ends, one line groups
+the clients by hash, and the players get a message. With three or more reports the hash most
+clients agree on stands for the game and the rest are named as having diverged from it
+("Out of sync at frame 3350: ENR's game differs from the other 2."); with two there is no
+majority and both are named ("Edward's and ENR's games disagree."). The frames after the
+first are not compared or logged: everything disagrees from there on. The replay plays back
+to the desync frame and pauses there, as a client's own replay of a desynced game already
+does, and its digest reports the frame and the odd client out.
+
+The harness scenarios `desync` (four players, p4 reports a wrong hash from frame 200) and
+`desync2` (two players) check the naming, that every client got exactly one server line,
+and that the recording survived.
+
 ## Testing
 
 `netcode-tests/` contains a harness of headless clients over simulated bad connections,

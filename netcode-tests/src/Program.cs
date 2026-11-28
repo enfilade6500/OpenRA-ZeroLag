@@ -28,6 +28,9 @@ namespace NetHarness
 		/// <summary>Joins as a spectator (no slot).</summary>
 		public bool Spectator;
 
+		/// <summary>From this net frame on, reports a wrong world hash (a diverged game).</summary>
+		public int WrongHashFromFrame = int.MaxValue;
+
 		/// <summary>Expected to be kicked during the game (by the vote script).</summary>
 		public bool ExpectKick;
 	}
@@ -102,6 +105,20 @@ namespace NetHarness
 				rogue.RogueInLobby = true;
 				rogue.NeverReady = true;
 				return new() { Good("p1"), Good("p2"), Good("p3"), Good("p4"), rogue };
+			}),
+
+			["desync"] = ("p4's game diverges at net frame 200 (it reports a wrong hash from then on); the server must name p4 once, to the log and the players, and keep recording the replay", () =>
+			{
+				var p4 = Good("p4");
+				p4.WrongHashFromFrame = 200;
+				return new() { Good("p1"), Good("p2"), Good("p3"), p4 };
+			}),
+
+			["desync2"] = ("a two-player game where p2 diverges at net frame 200: with two reports nobody can say whose game is right, so the server names both", () =>
+			{
+				var p2 = Good("p2");
+				p2.WrongHashFromFrame = 200;
+				return new() { Good("p1"), p2 };
 			}),
 
 			["chaos"] = ("every player has a different problem: slow link, lossy link, CPU hitches, 600 APM", () =>
@@ -319,6 +336,7 @@ namespace NetHarness
 			Scenarios.Spectators = int.Parse(opts.GetValueOrDefault("spectators", "4"));
 			var (description, build) = Scenarios.All[scenarioName];
 			var specs = build();
+			FakeClient.ExpectDesync = specs.Any(s => s.WrongHashFromFrame != int.MaxValue);
 
 			// --record all|first|none: which clients keep every packet they receive, for the replay check at the end
 			// and for --replay. Every client records up to RecordAllUpTo clients; above that only p1 does, because a
@@ -360,7 +378,7 @@ namespace NetHarness
 				var s = specs[i];
 				var proxy = new DelayProxy(server, s.Up, s.Down, seed * 100 + i);
 				proxies.Add(proxy);
-				var c = new FakeClient(s.Name, s.Cpu, seed * 1000 + i, specs.Count(x => !x.NeverReady), ordersPerSecond) { NeverReady = s.NeverReady, RogueLobbyPacket = s.RogueInLobby, ExpectedTotalClients = specs.Count, Spectator = s.Spectator, ExpectKick = s.ExpectKick };
+				var c = new FakeClient(s.Name, s.Cpu, seed * 1000 + i, specs.Count(x => !x.NeverReady), ordersPerSecond) { NeverReady = s.NeverReady, RogueLobbyPacket = s.RogueInLobby, ExpectedTotalClients = specs.Count, Spectator = s.Spectator, ExpectKick = s.ExpectKick, WrongHashFromFrame = s.WrongHashFromFrame };
 				c.Recording = record == "all" || (record == "first" && i == 0);
 				c.Metrics.Link = $"up {s.Up} / down {s.Down}";
 				clients.Add(c);
@@ -601,6 +619,23 @@ namespace NetHarness
 				var options = all[0].LobbyInfo?.GlobalSettings?.LobbyOptions;
 				if (options != null)
 					extraChecks.Add("lobby options: " + string.Join(", ", options.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key}={kv.Value.Value}")));
+			}
+
+			// A desync scenario: the server must say once who diverged, in a line every client receives, and the good
+			// clients must have seen the diverged client's hashes disagree from the frame it went wrong
+			if (FakeClient.ExpectDesync)
+			{
+				var diverged = specs.Where(x => x.WrongHashFromFrame != int.MaxValue).Select(x => x.Name).ToList();
+				var good = all.Where(c => !diverged.Contains(c.Metrics.Name)).ToList();
+				var lines = all.Select(c => c.ServerMessages.Select(m => m.Text).Where(t => t.StartsWith("Out of sync at frame", StringComparison.Ordinal)).ToList()).ToList();
+				var first = lines.FirstOrDefault(l => l.Count > 0)?.FirstOrDefault();
+				var detail = first == null ? "the server never said who" : first;
+				var ok = first != null && diverged.All(d => first.Contains(d, StringComparison.Ordinal)) && lines.All(l => l.Count == 1)
+					&& good.All(c => c.Metrics.Desyncs > 0);
+				if (!ok)
+					result.LockstepOk = false;
+				extraChecks.Add((ok ? "DESYNC NAMED: " : "DESYNC FAIL: ") + detail
+					+ $" (server lines per client: {string.Join("/", lines.Select(l => l.Count))}; disagreeing frames seen by the good clients: {string.Join("/", good.Select(c => c.Metrics.Desyncs))})");
 			}
 
 			result.ExtraChecks = extraChecks;

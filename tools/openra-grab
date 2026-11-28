@@ -105,10 +105,12 @@ fi
 
 NAME=openra-$(hostname -s)-$(date -u +%Y%m%d-%H%MZ)${HOURS:+-last${HOURS}h}${FULL:+-full}.tgz
 mkdir -p "$OUT"
+# A live game appends to the current logs while tar reads them ("file changed as we read it"); the archive just
+# holds the file as it was, which is what a snapshot is, so neither the warning nor tar's exit status 1 for it matters
 if [ -n "$FULL" ] || [ ! -d "$WORK/out" ]; then
-        tar czf "$OUT/$NAME" --null --no-recursion -T "$LIST"
+        tar czf "$OUT/$NAME" --warning=no-file-changed --null --no-recursion -T "$LIST" || [ $? -eq 1 ]
 else
-        tar czf "$OUT/$NAME" --null --no-recursion -T "$LIST" --recursion --transform 's|^\./||' -C "$WORK/out" .
+        tar czf "$OUT/$NAME" --warning=no-file-changed --null --no-recursion -T "$LIST" --recursion --transform 's|^\./||' -C "$WORK/out" . || [ $? -eq 1 ]
 fi
 chown "$OWNER" "$OUT/$NAME"
 

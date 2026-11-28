@@ -901,13 +901,14 @@ namespace OpenRA.Server
 		/// </summary>
 		const int OutOfSyncReportDelayFrames = 50;
 
-		void OutOfSync(int frame, int firstClient, byte[] firstPacket, int secondClient, byte[] secondPacket)
+		void OutOfSync(int frame, List<int> agreeingClients, byte[] agreedPacket, int client, byte[] packet)
 		{
 			outOfSyncFrame = frame;
-			outOfSyncPackets.Add((firstClient, firstPacket));
-			outOfSyncPackets.Add((secondClient, secondPacket));
-			Log.Write("server", $"Out of sync at frame {frame}: {ClientName(firstClient)} reported hash {SyncHashText(firstPacket)}, " +
-				$"{ClientName(secondClient)} reported {SyncHashText(secondPacket)}. The replay keeps recording.");
+			foreach (var c in agreeingClients)
+				outOfSyncPackets.Add((c, agreedPacket));
+			outOfSyncPackets.Add((client, packet));
+			Log.Write("server", $"Out of sync at frame {frame}: {agreeingClients.Select(ClientName).JoinWith(", ")} reported hash {SyncHashText(agreedPacket)}, " +
+				$"{ClientName(client)} reported {SyncHashText(packet)}. The replay keeps recording.");
 			ReportOutOfSyncIfComplete();
 		}
 
@@ -942,6 +943,7 @@ namespace OpenRA.Server
 				.GroupBy(p => SyncHashText(p.Packet))
 				.Select(g => (Hash: g.Key, Clients: g.Select(p => p.Client).Distinct().OrderBy(c => c).ToList()))
 				.OrderByDescending(g => g.Clients.Count)
+				.ThenBy(g => g.Clients[0])
 				.ToList();
 
 			Log.Write("server", $"Out of sync at frame {outOfSyncFrame} ({reason}): " +
@@ -968,7 +970,8 @@ namespace OpenRA.Server
 			SendMessage(message);
 		}
 
-		readonly Dictionary<int, (int Client, byte[] Packet)> syncForFrame = new();
+		/// <summary>Per frame, the first hash reported and every client that has reported it so far.</summary>
+		readonly Dictionary<int, (byte[] Packet, List<int> Clients)> syncForFrame = new();
 		int lastDefeatStateFrame;
 		ulong lastDefeatState;
 
@@ -990,8 +993,10 @@ namespace OpenRA.Server
 
 			if (syncForFrame.TryGetValue(frame, out var existingSync))
 			{
-				if (!existingSync.Packet.AsSpan().SequenceEqual(packet))
-					OutOfSync(frame, existingSync.Client, existingSync.Packet, from, packet);
+				if (existingSync.Packet.AsSpan().SequenceEqual(packet))
+					existingSync.Clients.Add(from);
+				else
+					OutOfSync(frame, existingSync.Clients, existingSync.Packet, from, packet);
 			}
 			else
 			{
@@ -1010,7 +1015,7 @@ namespace OpenRA.Server
 					lastDefeatStateFrame = frame;
 				}
 
-				syncForFrame.Add(frame, (from, packet));
+				syncForFrame.Add(frame, (packet, new List<int> { from }));
 			}
 		}
 
